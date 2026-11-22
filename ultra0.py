@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Google AI Ultra & AI Pro $0 Trial — One-Click Activation Script
+"""Google AI Ultra & AI Pro $0 Trial — One-Click Activation & Subscription Stacking Script
 
 Usage:
     python3 ultra0.py --check                                 # 1. Environment self-check
     python3 ultra0.py --test-plans                            # 2. Scan/test all Ultra & AI Pro plans/offers
     python3 ultra0.py accounts.txt                            # 3. Batch process accounts
     python3 ultra0.py --account a@b.com:password:totp_secret  # 4. Single account
-    python3 ultra0.py --account a@b.com:pass:totp --plan ultra # Test/activate Ultra (20TB / 30TB)
-    python3 ultra0.py --account a@b.com:pass:totp --plan all   # Try Ultra first, fallback to AI Pro
+    python3 ultra0.py --account current@device --no-add --force --stack --plan pro6  # 5. Stack +6 months
 
-Format of accounts.txt (one account per line):
-    email----password----recovery----totp----card_number----exp----cvc----holder----zip
-
-Prerequisites:
-    - A rooted Android phone or emulator (e.g. MuMu Player 12 with ROOT enabled) connected via ADB
-    - Target Google account logged in on the device (or let the script add it automatically)
-    - Python 3.9+ with frida installed (pip install frida==16.5.9)
+Subscription Stacking (--stack):
+    - Step 1: Activate initial trial (pro12 / pro3 / auto)
+    - Step 2: Stack +6 months (--stack --plan pro6)
+    - Step 3: Stack +6 months (--stack --plan pro6b)
+    - Step 4: Stack +6 months (--stack --plan pro6c)
+    Uses Play Store library.db purchaseToken + SubscriptionUpdateParams (CHARGE_FULL_PRICE = 5)
+    to convert and extend remaining trial days up to 24-30 months.
 """
-import argparse, base64, hashlib, hmac, json, lzma, os, re, select, struct, subprocess, sys, tempfile, threading, time, urllib.request
+import argparse, base64, hashlib, hmac, json, lzma, os, re, select, sqlite3, struct, subprocess, sys, tempfile, threading, time, urllib.request
 from pathlib import Path
 
-# Human confirmation gate: press Enter in CLI or click continue in web UI
+# Human confirmation gate: press Enter in CLI or click continue in GUI/web UI
 HUMAN_EVENT = threading.Event()
 WAITING = {"on": False, "msg": ""}
 
@@ -33,16 +32,27 @@ def wait_human(msg: str, timeout: int = 600) -> bool:
     print(f"\n⏸  Action required: {msg}")
     print("   Press [Enter] when finished to continue...", flush=True)
     HUMAN_EVENT.clear()
+    if os.name == "nt":
+        def _win_stdin_waiter():
+            try:
+                sys.stdin.readline()
+                HUMAN_EVENT.set()
+            except Exception:
+                pass
+        threading.Thread(target=_win_stdin_waiter, daemon=True).start()
     end = time.time() + timeout
     while time.time() < end:
         if HUMAN_EVENT.is_set():
             break
-        try:
-            r, _, _ = select.select([sys.stdin], [], [], 0.5)
-            if r:
-                sys.stdin.readline()
-                break
-        except Exception:
+        if os.name != "nt":
+            try:
+                r, _, _ = select.select([sys.stdin], [], [], 0.5)
+                if r:
+                    sys.stdin.readline()
+                    break
+            except Exception:
+                time.sleep(0.5)
+        else:
             time.sleep(0.5)
     WAITING["on"] = False
     print("▶  Resuming execution", flush=True)
@@ -61,34 +71,52 @@ REPORT_DIR = Path("ultra0-report")
 PLAN_PRODUCTS = {
     "pro": ["g1.2tb.ai.subs_variant", "g1.play.2tb.ai", "g1.2tb.ai"],
     "auto": ["g1.2tb.ai.subs_variant", "g1.play.2tb.ai", "g1.2tb.ai"],
-    "5x": ["g1.play.20tb", "g1.20tb.ai.pro", "g1.20tb"],
-    "20x": ["g1.play.ai.pro", "g1.ai.pro", "g1.30tb"],
+    "pro12": ["g1.2tb.ai.subs_variant"],
+    "pro6": ["g1.2tb.ai.subs_variant"],
+    "pro6b": ["g1.2tb.ai.subs_variant"],
+    "pro6c": ["g1.2tb.ai.subs_variant"],
+    "pro3": ["g1.play.2tb.ai"],
+    "5x": ["g1.play.20tb", "g1.20tb.ai.pro", "g1.20tb", "g1.20tb.3months_ip_75p.acq"],
+    "20x": ["g1.play.ai.pro", "g1.ai.pro", "g1.30tb", "g1.ai.ultra.3months_ip_90p.acq"],
     "ultra": [
-        "g1.play.ai.pro", "g1.ai.pro", "g1.30tb",
-        "g1.play.20tb", "g1.20tb.ai.pro", "g1.20tb",
+        "g1.play.ai.pro", "g1.ai.pro", "g1.30tb", "g1.ai.ultra.3months_ip_90p.acq",
+        "g1.play.20tb", "g1.20tb.ai.pro", "g1.20tb", "g1.20tb.3months_ip_75p.acq",
     ],
     "all": [
-        "g1.play.ai.pro", "g1.ai.pro", "g1.30tb",
-        "g1.play.20tb", "g1.20tb.ai.pro", "g1.20tb",
+        "g1.play.ai.pro", "g1.ai.pro", "g1.30tb", "g1.ai.ultra.3months_ip_90p.acq",
+        "g1.play.20tb", "g1.20tb.ai.pro", "g1.20tb", "g1.20tb.3months_ip_75p.acq",
         "g1.2tb.ai.subs_variant", "g1.play.2tb.ai", "g1.2tb.ai",
     ],
 }
 
+PLAN_DEFAULT_PREFER = {
+    "pro12": "12months-eft",
+    "pro6": "6months-eft",
+    "pro6b": "6months-eft-2",
+    "pro6c": "6months-eft-ss-2026",
+    "pro3": "eft-3mo",
+}
+
 ADB_CANDIDATES = [
+    os.environ.get("ADB_PATH", ""),
+    str(Path(__file__).resolve().parent / "platform-tools" / "adb.exe"),
     r"D:\MuMuPlayerGlobal\nx_device\12.0\shell\adb.exe",
     r"D:\MuMuPlayerGlobal\nx_main\adb.exe",
     r"C:\Program Files\Netease\MuMu Player 12\shell\adb.exe",
     r"C:\Program Files\Netease\MuMuPlayer-12.0\shell\adb.exe",
+    r"C:\Program Files\Netease\MuMuPlayerGlobal-12.0\shell\adb.exe",
     r"C:\MuMuPlayerGlobal\nx_device\12.0\shell\adb.exe",
     os.path.expanduser("~/Library/Android/sdk/platform-tools/adb"),
-    "/opt/homebrew/bin/adb", "/usr/local/bin/adb", "/usr/bin/adb", "adb",
+    "/opt/homebrew/bin/adb", "/usr/local/bin/adb", "/usr/bin/adb", "adb.exe", "adb",
 ]
 
 
 # ---------- Basic Helpers ----------
 def find_adb() -> str:
     for c in ADB_CANDIDATES:
-        if c == "adb" or Path(c).exists():
+        if not c:
+            continue
+        if c in ("adb", "adb.exe") or Path(c).exists():
             try:
                 subprocess.run([c, "version"], capture_output=True, timeout=5)
                 return c
@@ -131,16 +159,42 @@ def pick_device():
     out = sh("devices")
     lines = [l for l in out.splitlines()[1:] if "\tdevice" in l]
     if not lines:
+        for port in ("16384", "7555", "16416", "62001", "21503"):
+            try:
+                sh("connect", f"127.0.0.1:{port}", timeout=10)
+            except Exception:
+                pass
+            out = sh("devices")
+            lines = [l for l in out.splitlines()[1:] if "\tdevice" in l]
+            if lines:
+                note(f"Auto-connected to emulator at 127.0.0.1:{port}")
+                break
+    if not lines:
         sys.exit("❌ No Android device detected. Connect USB / start emulator, enable USB debugging, and authorize.")
     SERIAL = lines[0].split("\t")[0]
     ok(f"Device connected: {SERIAL}")
 
 
 def ensure_root():
-    try:
-        uid = sh("shell", "su -c id", timeout=15)
-    except Exception:
-        uid = ""
+    def _id():
+        try:
+            return sh("shell", "id", timeout=15)
+        except Exception:
+            return ""
+
+    uid = _id()
+    if "uid=0" not in uid:
+        try:
+            sh("root", timeout=20)
+            time.sleep(1)
+            uid = _id()
+        except Exception:
+            pass
+    if "uid=0" not in uid:
+        try:
+            uid = sh("shell", "su -c id", timeout=15)
+        except Exception:
+            uid = ""
     if "uid=0" not in uid:
         sys.exit("❌ Root access not available on device. Root is required to inject BillingClient.")
 
@@ -190,6 +244,81 @@ def ensure_frida_server():
             ok("frida-server started")
             return
     sys.exit("❌ Failed to start frida-server")
+
+
+def read_purchase_token(sku_short: str = "g1.") -> str:
+    """Read current active purchaseToken from Play Store library.db (used for --stack subscription stacking)."""
+    remote = "/data/local/tmp/lib_read.db"
+    try:
+        sh("shell", f"su -c 'cp /data/data/{VENDING}/databases/library.db {remote} && chmod 666 {remote}'", timeout=30)
+    except Exception:
+        pass
+    tmp = Path(tempfile.gettempdir()) / "lib_read.db"
+    try:
+        if tmp.exists():
+            tmp.unlink()
+        sh("pull", remote, str(tmp), timeout=60)
+    except Exception as e:
+        warn(f"Failed to pull library.db: {e}")
+        return ""
+    if not tmp.exists():
+        return ""
+    tok = ""
+    try:
+        con = sqlite3.connect(str(tmp))
+        cur = con.cursor()
+        rows = cur.execute(
+            "select account, subs_valid_until_time, inapp_purchase_data "
+            "from ownership where doc_id like ?",
+            (f"%{sku_short}%",),
+        ).fetchall()
+        now_ms = int(time.time() * 1000)
+        picked = None
+        for account, valid, data in rows:
+            if not data:
+                continue
+            try:
+                j = json.loads(data)
+            except Exception:
+                continue
+            tk = j.get("purchaseToken")
+            if not tk:
+                continue
+            try:
+                alive = int(valid) > now_ms
+            except Exception:
+                alive = False
+            if picked is None or (alive and not picked[2]) or (alive == picked[2] and int(valid or 0) > picked[3]):
+                picked = (tk, account, alive, int(valid or 0))
+        if picked:
+            tok = picked[0]
+            status_str = "active" if picked[2] else "expired"
+            note(f"Found purchaseToken from account: {picked[1]} ({status_str})")
+        con.close()
+    except Exception as e:
+        warn(f"Failed to read library.db: {e}")
+    finally:
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
+    return tok
+
+
+def ensure_vending():
+    """Ensure Play Store process is running so BillingClient queries return reliably."""
+    if sh("shell", f"pidof {VENDING}"):
+        ok("Play Store service is running")
+        return
+    warn("Play Store is not running, starting it in background...")
+    sh("shell", f"monkey -p {VENDING} -c android.intent.category.LAUNCHER 1", timeout=30)
+    for _ in range(15):
+        time.sleep(1)
+        if sh("shell", f"pidof {VENDING}"):
+            ok("Play Store started")
+            time.sleep(2)
+            return
+    warn("Play Store did not start yet; billing query may take longer")
 
 
 def ensure_module_apk():
@@ -296,7 +425,7 @@ def accounts_on_device() -> list:
 def add_account(email, password, totp_secret="") -> bool:
     """Add Google account to the device."""
     step(f"Adding account to device: {email}")
-    existing =accounts_on_device()
+    existing = accounts_on_device()
     if any(email.lower() in line.lower() for line in existing):
         ok("Account is already on device")
         return True
@@ -454,39 +583,85 @@ def switch_play(email) -> bool:
 
 # ---------- Frida ----------
 def launch_app() -> int:
+    if PKG not in sh("shell", f"pm list packages {PKG}"):
+        warn(f"Google One ({PKG}) is not installed on device. Opening Play Store...")
+        sh("shell", f"am start -a android.intent.action.VIEW -d 'market://details?id={PKG}'")
+        return 0
     sh("shell", f"am force-stop {PKG}")
     sh("shell", f"monkey -p {PKG} -c android.intent.category.LAUNCHER 1")
-    time.sleep(7)
-    pid = sh("shell", f"pidof {PKG}")
-    return int(pid) if pid.strip().isdigit() else 0
+    time.sleep(1)
+    for i in range(25):
+        time.sleep(1)
+        pid = sh("shell", f"pidof {PKG}")
+        if pid.strip().isdigit():
+            if i >= 3:
+                time.sleep(2)
+            return int(pid)
+    sh("shell", f"am start -n {PKG}/{PKG}.LauncherActivity")
+    for _ in range(10):
+        time.sleep(1)
+        pid = sh("shell", f"pidof {PKG}")
+        if pid.strip().isdigit():
+            time.sleep(2)
+            return int(pid)
+    return 0
 
 
-def build_js(plan: str = "auto", prefer: str = "", exclude: list | None = None, query_only: bool = False) -> str:
-    """Build Frida script for the selected plan:
-    pro / auto = AI Pro 5TB
-    5x         = AI Ultra 20TB
-    20x        = AI Ultra 30TB
-    ultra      = All AI Ultra tiers (30TB + 20TB)
-    all        = All AI Ultra (30TB + 20TB) + AI Pro (5TB) tiers
-    """
+def build_js(
+    plan: str = "auto",
+    prefer: str = "",
+    exclude: list | None = None,
+    query_only: bool = False,
+    stack: bool = False,
+    old_token: str = "",
+    stack_mode: int | None = None,
+    force_token: str = "",
+    sku: str = "",
+    allow_paid: bool = False,
+) -> str:
+    """Build Frida injection script with plan SKUs, offer preference, stacking, and promo parameters."""
     js = FRIDA_JS
-    products = PLAN_PRODUCTS.get(plan, PLAN_PRODUCTS["auto"])
+    products = [sku] if sku else PLAN_PRODUCTS.get(plan, PLAN_PRODUCTS["auto"])
+    effective_prefer = prefer or ("" if sku else PLAN_DEFAULT_PREFER.get(plan, ""))
     js = js.replace(
         'var PRODUCTS=["g1.2tb.ai.subs_variant","g1.play.2tb.ai","g1.2tb.ai"];',
         f"var PRODUCTS={json.dumps(products)};",
     )
-    if prefer:
-        js = js.replace('var PREFER="";', f'var PREFER={json.dumps(prefer)};')
+    if effective_prefer:
+        js = js.replace('var PREFER="";', f'var PREFER={json.dumps(effective_prefer)};')
     if exclude:
         js = js.replace('var EXCLUDE=[];', f'var EXCLUDE={json.dumps(exclude)};')
     if query_only:
         js = js.replace('var QUERY_ONLY=false;', 'var QUERY_ONLY=true;')
+    if stack:
+        js = js.replace('var STACK=false;', 'var STACK=true;')
+    if old_token:
+        js = js.replace('var OLD_TOKEN="";', f'var OLD_TOKEN={json.dumps(old_token)};')
+    if stack_mode is not None:
+        js = js.replace('var STACK_MODE=5;', f'var STACK_MODE={int(stack_mode)};')
+    if allow_paid:
+        js = js.replace('var ALLOW_PAID=false;', 'var ALLOW_PAID=true;')
+    if force_token:
+        js = js.replace('var FORCE_TOKEN="";', f'var FORCE_TOKEN={json.dumps(force_token)};')
     return js
 
 
-def run_trial(pid: int, wait=90, plan="auto", prefer: str = "", exclude: list | None = None, query_only: bool = False) -> dict:
+def run_trial(
+    pid: int,
+    wait=90,
+    plan="auto",
+    prefer: str = "",
+    exclude: list | None = None,
+    query_only: bool = False,
+    stack: bool = False,
+    old_token: str = "",
+    stack_mode: int | None = None,
+    force_token: str = "",
+    sku: str = "",
+    allow_paid: bool = False,
+) -> dict:
     import frida
-    step(f"Injecting billing module & querying offers (plan={plan}{', offer=' + prefer if prefer else ''})")
+    step(f"Injecting billing module & querying offers (plan={plan}{', sku=' + sku if sku else ''}{', offer=' + prefer if prefer else ''}{', stack=True' if stack else ''})")
     dev = frida.get_usb_device(timeout=10)
     sess = dev.attach(pid)
     res = {"offers": [], "chosen": None, "launched": None, "purchase": None, "errors": [], "done": False}
@@ -496,12 +671,14 @@ def run_trial(pid: int, wait=90, plan="auto", prefer: str = "", exclude: list | 
         ev = p.get("ev")
         if ev == "offer":
             res["offers"].append(p)
-            price_str = "$0 (FREE TRIAL)" if str(p.get("micros")) == "0" else f"{int(p.get('micros', 0))/1e6:.2f}"
+            price_str = "$0 (FREE TRIAL)" if str(p.get("micros")) == "0" else f"${int(p.get('micros', 0))/1e6:.2f}"
             note(f"[{p.get('product')}] offer={p.get('id')} → {price_str} (period={p.get('period','')})")
         elif ev == "chosen":
             res["chosen"] = p
             ok(f"Selected offer: product={p.get('product')}, id={p.get('id')}, period={p.get('period')}")
-        elif ev == "query_done":
+        elif ev == "stack_mode":
+            ok(f"Subscription stacking active: mode={p.get('mode')}, oldToken={p.get('old')}...")
+        elif ev in ("query_done", "list_only"):
             res["done"] = True
         elif ev == "launched":
             res["launched"] = p
@@ -511,7 +688,20 @@ def run_trial(pid: int, wait=90, plan="auto", prefer: str = "", exclude: list | 
         elif ev and ("err" in ev or ev.startswith("no_")):
             res["errors"].append(p)
 
-    sc = sess.create_script(build_js(plan, prefer=prefer, exclude=exclude, query_only=query_only))
+    sc = sess.create_script(
+        build_js(
+            plan=plan,
+            prefer=prefer,
+            exclude=exclude,
+            query_only=query_only,
+            stack=stack,
+            old_token=old_token,
+            stack_mode=stack_mode,
+            force_token=force_token,
+            sku=sku,
+            allow_paid=allow_paid,
+        )
+    )
     sc.on("message", on_msg)
     sc.load()
     for _ in range(wait * 2):
@@ -546,7 +736,7 @@ def handle_verify(password="") -> bool:
     return changed
 
 
-def confirm_zero(wait=40, password="") -> dict:
+def confirm_zero(wait=40, password="", allow_paid=False) -> dict:
     step("Checking billing sheet price (confirming only if $0 / free trial)")
     out = {"price": None, "confirmed": False, "subscribed": False, "ineligible": False, "text": ""}
     checkout_seen = False
@@ -559,6 +749,11 @@ def confirm_zero(wait=40, password="") -> dict:
             warn("Play Store notice: Account is not eligible for free trial")
             tap_text("OK", "Got it")
             out["ineligible"] = True
+            return out
+        if "already subscribed" in text.lower():
+            warn("Play Store notice: Account is already subscribed to this product")
+            tap_text("OK", "Got it")
+            out["error"] = "already_subscribed"
             return out
         if "not available for purchase" in text.lower():
             warn("Google Play error: The item you requested is not available for purchase")
@@ -573,8 +768,10 @@ def confirm_zero(wait=40, password="") -> dict:
             out["text"] = text[:300]
             is_free = (
                 "free trial" in text.lower()
-                or re.search(r"(US\$|HK\$|NT\$|\$)\s?0(\.00)?\b", text)
+                or re.search(r"(US\$|HK\$|NT\$|JP¥|¥|\$)\s?0(\.00)?\b", text)
                 or "US$0" in text
+                or "remaining time" in text.lower()
+                or "converted from" in text.lower()
             )
             if is_free:
                 ok("Detected free trial / $0 offer, clicking Subscribe (1st tap)")
@@ -600,7 +797,11 @@ def confirm_zero(wait=40, password="") -> dict:
                 break
             else:
                 m = re.search(r"(US\$|HK\$|NT\$|\$|€|£)\s?([\d.,]+)", text)
-                warn(f"Current price is {m.group(0) if m else 'unknown'} (not a free trial), aborting confirmation")
+                out["price"] = m.group(0) if m else None
+                if allow_paid:
+                    note(f"Promotional paid checkout sheet opened ({out['price'] or 'paid'}). Please review and confirm on screen.")
+                    return out
+                warn(f"Current price is {out['price'] or 'unknown'} (not a free trial), aborting confirmation")
                 return out
         time.sleep(2)
 
@@ -692,20 +893,20 @@ def verify() -> str:
     return text[:500]
 
 
-def test_all_plans() -> int:
-    """Query all Ultra (30TB, 20TB) and AI Pro (5TB) SKUs and display all available offers."""
-    step("Testing all Ultra (30TB / 20TB) and AI Pro (5TB) plans on current Play account")
+def test_all_plans(sku: str = "", plan: str = "all") -> int:
+    """Query all Ultra (30TB, 20TB, promo .acq) and AI Pro (5TB) SKUs and display all available offers."""
+    step(f"Testing plans (plan={plan}{', sku=' + sku if sku else ''}) on current Play account")
     pid = launch_app()
     if not pid:
         warn("Failed to start Google One app")
         return 1
-    fr = run_trial(pid, plan="all", query_only=True)
+    fr = run_trial(pid, plan=plan, sku=sku, query_only=True, allow_paid=True)
     offers = fr.get("offers", [])
-    print("\n" + "=" * 78)
-    print(f"  {'PRODUCT SKU':<28} {'OFFER ID':<22} {'PRICE':<14} {'PERIOD'}")
-    print("=" * 78)
+    print("\n" + "=" * 86)
+    print(f"  {'PRODUCT SKU':<32} {'OFFER ID':<22} {'PRICE':<14} {'PERIOD'}")
+    print("=" * 86)
     if not offers:
-        print("  No offers returned for any Ultra or AI Pro SKU.")
+        print("  No offers returned for the queried SKU(s).")
     else:
         for o in offers:
             prod = o.get("product", "")
@@ -713,20 +914,37 @@ def test_all_plans() -> int:
             micros = str(o.get("micros", ""))
             price = "$0 (FREE)" if micros == "0" else f"${int(micros)/1e6:.2f}" if micros.isdigit() else micros
             period = o.get("period", "")
-            print(f"  {prod:<28} {oid:<22} {price:<14} {period}")
-    print("=" * 78)
+            print(f"  {prod:<32} {oid:<22} {price:<14} {period}")
+    print("=" * 86)
     if fr.get("errors"):
         note(f"Notes/Events: {fr['errors']}")
     return 0
 
 
 # ---------- Single Account Flow ----------
-def process(email, password="", totp_secret="", add=True, card=None, plan="auto", no_switch=False, offer="") -> dict:
+def process(
+    email,
+    password="",
+    totp_secret="",
+    add=True,
+    card=None,
+    plan="auto",
+    no_switch=False,
+    offer="",
+    list_only=False,
+    stack=False,
+    old_token="",
+    stack_mode=None,
+    force_token="",
+    sku="",
+    allow_paid=False,
+    force=False,
+) -> dict:
     print("\n" + "=" * 56)
-    print(f"  Processing account: {email} (plan={plan})")
+    print(f"  Processing account: {email} (plan={plan}{', stack=True' if stack else ''})")
     print("=" * 56)
     rec = {"email": email, "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "status": "unknown", "plan": plan}
-    if add:
+    if add and email != "current@device":
         try:
             if not add_account(email, password, totp_secret):
                 rec["status"] = "add_account_failed"
@@ -740,7 +958,12 @@ def process(email, password="", totp_secret="", add=True, card=None, plan="auto"
             add_card(card)
         except Exception as e:
             warn(f"Failed to bind card: {e}")
-    if no_switch:
+    if force or email == "current@device":
+        ok("Using current active Play Store account on device (--force / current@device)")
+    elif list_only:
+        cur = current_play_account()
+        ok(f"List-only mode on current device account: {cur or 'unknown'}")
+    elif no_switch:
         cur = current_play_account()
         if cur != email.lower():
             warn(f"Current Play account is {cur or 'unknown'}, expected {email} — aborting")
@@ -751,19 +974,49 @@ def process(email, password="", totp_secret="", add=True, card=None, plan="auto"
         rec["status"] = "play_account_switch_failed"
         return rec
 
-    exclude_offers = []
-    max_attempts = 1 if offer else 5
-    for attempt in range(1, max_attempts + 1):
+    if stack and not old_token:
+        note("Reading current active subscription purchaseToken from Play Store library.db...")
+        old_token = read_purchase_token("g1.")
+        if old_token:
+            ok(f"Found active purchaseToken ({old_token[:16]}...); will stack using SubscriptionUpdateParams")
+        else:
+            warn("Could not read purchaseToken from library.db; falling back to BillingClient.queryPurchasesAsync")
+
+    if list_only:
         pid = launch_app()
         if not pid:
             rec["status"] = "app_not_started"
             return rec
-        fr = run_trial(pid, plan=plan, prefer=offer, exclude=exclude_offers)
+        fr = run_trial(pid, plan=plan, prefer=offer, query_only=True, sku=sku, allow_paid=allow_paid)
+        rec.update(fr)
+        rec["status"] = "listed"
+        return rec
+
+    exclude_offers = []
+    explicit_prefer = offer or PLAN_DEFAULT_PREFER.get(plan, "")
+    max_attempts = 1 if (explicit_prefer or sku) else 5
+    for _ in range(1, max_attempts + 1):
+        pid = launch_app()
+        if not pid:
+            rec["status"] = "app_not_started"
+            return rec
+        fr = run_trial(
+            pid,
+            plan=plan,
+            prefer=offer,
+            exclude=exclude_offers,
+            stack=stack,
+            old_token=old_token,
+            stack_mode=stack_mode,
+            force_token=force_token,
+            sku=sku,
+            allow_paid=allow_paid,
+        )
         rec.update(fr)
         if fr["launched"] and fr["launched"].get("code") == 0:
-            sheet = confirm_zero(password=password)
+            sheet = confirm_zero(password=password, allow_paid=allow_paid)
             rec["sheet"] = sheet
-            if sheet.get("error") == "item_not_available" and not offer and fr.get("chosen"):
+            if sheet.get("error") == "item_not_available" and not explicit_prefer and fr.get("chosen"):
                 failed_id = fr["chosen"].get("id")
                 if failed_id and failed_id not in exclude_offers:
                     warn(f"Offer '{failed_id}' is not available for purchase; falling back to next free trial offer...")
@@ -792,6 +1045,7 @@ def do_check():
     ensure_network()
     ensure_frida_server()
     ensure_module_apk()
+    ensure_vending()
     try:
         import frida
         ok(f"frida: {frida.__version__}")
@@ -830,17 +1084,29 @@ def parse_card(parts) -> dict | None:
 
 def main():
     global ADB, SERIAL
-    ap = argparse.ArgumentParser(description="Google AI Ultra & AI Pro $0 Trial One-Click Script")
+    ap = argparse.ArgumentParser(description="Google AI Ultra & AI Pro $0 Trial & Stacking Script")
     ap.add_argument("accounts", nargs="?", help="Accounts file (each line: email----password----recovery----totp)")
-    ap.add_argument("--account", help="Single account: email:password:totp")
+    ap.add_argument("--account", help="Single account: email:password:totp (or current@device)")
     ap.add_argument("--check", action="store_true", help="Run environment self-check only")
-    ap.add_argument("--test-plans", action="store_true", help="Query and list all Ultra (30TB/20TB) & AI Pro (5TB) offers")
+    ap.add_argument("--test-plans", action="store_true", help="Query and list all Ultra (30TB/20TB/.acq) & AI Pro (5TB) offers")
+    ap.add_argument("--list", action="store_true", help="Only list offers and tokens without opening checkout sheet")
+    ap.add_argument("--force", action="store_true", help="Skip Play Store account verification (use current logged-in account)")
+    ap.add_argument("--stack", action="store_true", help="Stack trial duration via SubscriptionUpdateParams (oldPurchaseToken + CHARGE_FULL_PRICE)")
+    ap.add_argument("--old-token", default="", help="Explicit old purchaseToken for --stack")
+    ap.add_argument("--mode", type=int, default=None, help="Proration mode for --stack (1..5, default 5=CHARGE_FULL_PRICE)")
+    ap.add_argument("--allow-paid", action="store_true", help="Allow opening paid promotional offers (e.g. Ultra 20TB $24.99 / 30TB $19.99)")
+    ap.add_argument("--sku", default="", help="Query a specific product SKU (e.g. g1.20tb.3months_ip_75p.acq)")
+    ap.add_argument("--force-token", default="", help="Force using a specific offer token")
     ap.add_argument("--serial", default=None, help="Specify ADB device serial")
     ap.add_argument("--no-add", action="store_true", help="Skip adding account (account already logged in on device)")
     ap.add_argument("--no-switch", action="store_true",
                     help="Do not auto-switch Play account; only verify current Play account matches")
-    ap.add_argument("--plan", default="auto", choices=["auto", "pro", "5x", "20x", "ultra", "all"],
-                    help="pro/auto=AI Pro 5TB; 5x=Ultra 20TB; 20x=Ultra 30TB; ultra=All Ultra tiers; all=Ultra + Pro")
+    ap.add_argument(
+        "--plan",
+        default="auto",
+        choices=["auto", "pro", "pro12", "pro6", "pro6b", "pro6c", "pro3", "5x", "20x", "ultra", "all"],
+        help="pro/auto=AI Pro 5TB; pro12/pro6/pro6b/pro6c/pro3=Specific Pro offers; 5x=Ultra 20TB; 20x=Ultra 30TB; ultra=All Ultra; all=Ultra+Pro",
+    )
     ap.add_argument("--offer", default="", help="Specify exact offer ID (e.g. 12months-eft, 6months-eft, eft-3mo)")
     a = ap.parse_args()
 
@@ -855,12 +1121,15 @@ def main():
     ensure_network()
     ensure_frida_server()
     ensure_module_apk()
+    ensure_vending()
 
     if a.test_plans:
-        return test_all_plans()
+        return test_all_plans(sku=a.sku, plan=a.plan if a.plan != "auto" else "all")
 
     REPORT_DIR.mkdir(exist_ok=True)
     rows = []
+    if a.list and not a.account and not a.accounts:
+        a.account = "current@device"
     if a.account:
         parts = a.account.split(":", 2)
         rows = [[parts[0], parts[1] if len(parts) > 1 else "", "", parts[2] if len(parts) > 2 else ""]]
@@ -877,8 +1146,24 @@ def main():
         card = parse_card(row)
         print(f"\n──── Progress {i}/{len(rows)} ────")
         try:
-            rec = process(email, pw, sec, add=not a.no_add, card=card, plan=a.plan,
-                          no_switch=a.no_switch, offer=a.offer)
+            rec = process(
+                email,
+                pw,
+                sec,
+                add=(not a.no_add and not a.list),
+                card=card,
+                plan=a.plan,
+                no_switch=a.no_switch,
+                offer=a.offer,
+                list_only=a.list,
+                stack=a.stack,
+                old_token=a.old_token,
+                stack_mode=a.mode,
+                force_token=a.force_token,
+                sku=a.sku,
+                allow_paid=a.allow_paid,
+                force=a.force,
+            )
         except Exception as e:
             rec = {"email": email, "status": "exception", "error": str(e)[:200]}
         results.append(rec)
@@ -899,12 +1184,17 @@ entry = main
 
 
 # ---------- Embedded Resources (Do Not Modify MODULE_B64) ----------
-FRIDA_JS = r'''// Ultra0 injection script: multi-product query -> pick longest free trial -> launch billing flow on main thread
+FRIDA_JS = r'''// Ultra0 injection script: multi-product query -> pick longest free trial (or stack) -> launch billing flow on main thread
 var dexLoader=null, ctxRef=null, clientRef=null;
 var PRODUCTS=["g1.2tb.ai.subs_variant","g1.play.2tb.ai","g1.2tb.ai"];   // AI Pro 5TB / Ultra SKUs
-var PREFER="";        // Empty = pick longest trial automatically; or pass specific offer ID e.g. "eft-3mo"
+var PREFER="";        // Empty = pick longest trial automatically; or pass specific offer ID e.g. "6months-eft"
 var EXCLUDE=[];       // Offer IDs to skip (e.g. failed with item_not_available)
 var QUERY_ONLY=false; // True = only list offers without launching billing sheet
+var STACK=false;      // True = stack subscription via SubscriptionUpdateParams
+var OLD_TOKEN="";     // Existing purchaseToken from library.db
+var STACK_MODE=5;     // 5 = CHARGE_FULL_PRICE (converts remaining trial days)
+var ALLOW_PAID=false; // True = allow paid promotional offers (lowest first-phase price)
+var FORCE_TOKEN="";   // Force specific offer token
 function L(v){ Java.classFactory.loader=v; }
 function S(o){ send(o); }
 
@@ -927,6 +1217,31 @@ function getActivity(){
       onComplete:function(){}
     });
   }catch(e){ S({ev:"choose_err", m:String(e).slice(0,80)}); }
+  if(found) return found;
+  try{
+    Java.choose("android.app.ActivityThread$ActivityClientRecord", {
+      onMatch:function(rec){ try{ var a=rec.activity; if(a && !found && !a.isFinishing()) found=a; }catch(e){} },
+      onComplete:function(){}
+    });
+  }catch(e){}
+  if(found) return found;
+  try{
+    var AT=Java.use("android.app.ActivityThread");
+    var ACR2=Java.use("android.app.ActivityThread$ActivityClientRecord");
+    var th=AT.currentActivityThread();
+    var actsField=th?th.mActivities:null;
+    var acts=(actsField && actsField.value !== undefined) ? actsField.value : actsField;
+    if(acts){
+      var arr=Java.cast(acts, Java.use("android.util.ArrayMap"));
+      var n=arr.size();
+      for(var i=0;i<n;i++){
+        var rec=Java.cast(arr.valueAt(i), ACR2);
+        var actField=rec.activity;
+        var a=(actField && actField.value !== undefined) ? actField.value : actField;
+        if(a && !a.isFinishing()){ found=a; break; }
+      }
+    }
+  }catch(e){}
   return found;
 }
 function boot(){
@@ -985,19 +1300,32 @@ function query(){
           var micros=String(first.getPriceAmountMicros());
           var period=String(first.getBillingPeriod());
           S({ev:"offer", product:pid, id:oid, micros:micros, period:period, token:tok.slice(0,24)});
-          if(micros!=="0") continue;
           if(isExcluded(oid)) continue;
+          if(micros!=="0" && !FORCE_TOKEN && !ALLOW_PAID) continue;
+          if(ALLOW_PAID && !FORCE_TOKEN && micros!=="0"){
+            var price=parseInt(micros,10)||0;
+            if(!best || best.price===undefined || price<best.price){
+              best={pd:pd, offer:o, product:pid, id:oid, rank:periodRank(period), period:period, token:tok, price:price};
+            }
+            continue;
+          }
           var rank=periodRank(period);
           if(!best || rank>best.rank || (PREFER && oid===PREFER)){
             if(PREFER && oid!==PREFER) continue;
-            best={pd:pd, offer:o, product:pid, id:oid, rank:rank, period:period, token:tok};
+            best={pd:pd, offer:o, product:pid, id:oid, rank:rank, period:period, token:tok, price:0};
           }
         }
       }
       if(QUERY_ONLY){ S({ev:"query_done"}); return; }
       if(!best){ S({ev:"no_trial"}); return; }
       S({ev:"chosen", product:best.product, id:best.id, period:best.period});
-      launch(best.pd, best.offer);
+      if(OLD_TOKEN){
+        launch(best.pd, best.offer, OLD_TOKEN);
+      } else if(STACK){
+        launchWithStack(best.pd, best.offer);
+      } else {
+        launch(best.pd, best.offer, "");
+      }
     }}});
   var arr=Java.use("java.util.ArrayList").$new();
   for(var k=0;k<PRODUCTS.length;k++){
@@ -1008,15 +1336,51 @@ function query(){
   S({ev:"query_sent"});
  }catch(e){ S({ev:"query_err", m:String(e).slice(0,200)}); }
 }
-function launch(pd, offer){
+function launchWithStack(pd, offer){
+ try{
+  L(dexLoader);
+  var QP=Java.use("com.android.billingclient.api.QueryPurchasesParams");
+  var PRL=Java.use("com.android.billingclient.api.PurchasesResponseListener");
+  var cls=Java.registerClass({name:"rc.P"+Date.now(), implements:[PRL], methods:{
+    onQueryPurchasesResponse:function(br, purchases){
+      try{
+        var list=Java.cast(purchases, Java.use("java.util.List"));
+        if(list.size()===0){ S({ev:"no_purchase"}); launch(pd, offer, ""); return; }
+        var pu=Java.cast(list.get(0), Java.use("com.android.billingclient.api.Purchase"));
+        var tok=String(pu.getPurchaseToken());
+        launch(pd, offer, tok);
+      }catch(e){ S({ev:"stack_query_err", m:String(e).slice(0,200)}); launch(pd, offer, ""); }
+    }}});
+  var qp=QP.newBuilder().setProductType("subs").build();
+  clientRef.queryPurchasesAsync(qp, cls.$new());
+ }catch(e){ S({ev:"stack_outer_err", m:String(e).slice(0,200)}); launch(pd, offer, ""); }
+}
+function launch(pd, offer, oldTok){
  try{
   L(dexLoader);
   var PDP=Java.use("com.android.billingclient.api.BillingFlowParams$ProductDetailsParams");
   var BFP=Java.use("com.android.billingclient.api.BillingFlowParams");
-  var pdp=PDP.newBuilder().setProductDetails(pd).setOfferToken(String(offer.getOfferToken())).build();
+  var ot=FORCE_TOKEN ? FORCE_TOKEN : String(offer.getOfferToken());
+  var pdp=PDP.newBuilder().setProductDetails(pd).setOfferToken(ot).build();
   var l=Java.use("java.util.ArrayList").$new(); l.add(pdp);
-  var params=BFP.newBuilder().setProductDetailsParamsList(l).build();
-  var act=getActivity();
+  var b=BFP.newBuilder().setProductDetailsParamsList(l);
+  if(oldTok){
+    try{
+      var SUP=Java.use("com.android.billingclient.api.BillingFlowParams$SubscriptionUpdateParams");
+      var sb=SUP.newBuilder();
+      try{ sb=sb.setReplaceProrationMode(STACK_MODE); }
+      catch(e1){ try{ sb=sb.setReplaceSkusProrationMode(STACK_MODE); }catch(e2){} }
+      var sup=sb.setOldPurchaseToken(String(oldTok)).build();
+      b=b.setSubscriptionUpdateParams(sup);
+      S({ev:"stack_mode", mode:STACK_MODE, old:String(oldTok).slice(0,16)});
+    }catch(e){ S({ev:"stack_param_err", m:String(e).slice(0,160)}); }
+  }
+  var params=b.build();
+  var act=null;
+  for(var t=0;t<5 && !act;t++){
+    act=getActivity();
+    if(!act && t<4){ try{ Java.use("java.lang.Thread").sleep(1000); }catch(e){} }
+  }
   S({ev:"activity", a: act? String(act.getClass().getName()) : "null"});
   if(!act){ S({ev:"no_activity"}); return; }
   L(null);
@@ -1033,7 +1397,18 @@ function launch(pd, offer){
   Handler.$new(Looper.getMainLooper()).post(R.$new());
  }catch(e){ S({ev:"launch_outer_err", m:String(e).slice(0,200)}); }
 }
-var iv=setInterval(function(){ try{ L(null); var a=Java.use("android.app.ActivityThread").currentApplication(); if(a){clearInterval(iv); boot();} }catch(e){} },400);
+var __tries=0;
+var iv=setInterval(function(){
+  try{
+    L(null);
+    var a=Java.use("android.app.ActivityThread").currentApplication();
+    __tries++;
+    if(a || __tries>10){ clearInterval(iv); boot(); }
+  }catch(e){
+    __tries++;
+    if(__tries>10){ clearInterval(iv); try{ boot(); }catch(e2){} }
+  }
+},400);
 
 '''
 

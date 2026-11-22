@@ -407,17 +407,29 @@ def environment_check() -> bool:
 
 
 # ---------- 2. Choose Plan & Input Accounts ----------
-def choose_plan() -> str:
-    banner("Step 2 · Choose Plan / Test Ultra Offers")
-    print("  Select which plan to test or activate:")
-    print("    1) Google AI Pro 5TB (Default — 12m / 6m / 3m free trial)")
-    print("    2) Google AI Ultra 20TB (5x plan)")
-    print("    3) Google AI Ultra 30TB (20x plan)")
-    print("    4) All Ultra + AI Pro tiers (Try Ultra 30TB/20TB first, fallback to AI Pro 5TB)")
-    print("    5) Scan / Test all available Ultra & AI Pro offers on current device account (No purchase)")
-    sel = input("\n  Enter choice [1-5, default=1]: ").strip()
-    mapping = {"1": "pro", "2": "5x", "3": "20x", "4": "all", "5": "test"}
-    return mapping.get(sel, "pro")
+def choose_plan() -> tuple[str, bool]:
+    banner("Step 2 · Choose Plan / Stack / Test Ultra Offers")
+    print("  Select which action or plan to run:")
+    print("    1) Google AI Pro 5TB — Free Trial with Auto-Fallback (12m -> 6m -> 3m)")
+    print("    2) Stack +6 Months (Step 2 -> 18 months total, uses --stack --plan pro6)")
+    print("    3) Stack +6 Months (Step 3 -> 24 months total, uses --stack --plan pro6b)")
+    print("    4) Stack +6 Months Backup (Step 4 -> 30 months total, uses --stack --plan pro6c)")
+    print("    5) Google AI Ultra 20TB (5x plan & $24.99/mo 75% off promo SKU)")
+    print("    6) Google AI Ultra 30TB (20x plan & $19.99/mo 90% off promo SKU)")
+    print("    7) All Ultra + AI Pro tiers (Try Ultra first, fallback to AI Pro 5TB)")
+    print("    8) Scan / Test all available Ultra & AI Pro offers on current device account (No purchase)")
+    sel = input("\n  Enter choice [1-8, default=1]: ").strip()
+    mapping = {
+        "1": ("pro", False),
+        "2": ("pro6", True),
+        "3": ("pro6b", True),
+        "4": ("pro6c", True),
+        "5": ("5x", False),
+        "6": ("20x", False),
+        "7": ("all", False),
+        "8": ("test", False),
+    }
+    return mapping.get(sel, ("pro", False))
 
 
 FORMAT_HINT = """\
@@ -467,8 +479,8 @@ def progress_bar(i: int, total: int, width: int = 24) -> str:
     return f"[{i}/{total}] {c(bar, C.B)} {pct:>3}%"
 
 
-def run_accounts(rows: list, plan: str = "pro") -> list:
-    banner(f"Step 4 · Activating Accounts (plan={plan})")
+def run_accounts(rows: list, plan: str = "pro", stack: bool = False) -> list:
+    banner(f"Step 4 · Activating Accounts (plan={plan}{', stack=True' if stack else ''})")
     ultra0.REPORT_DIR.mkdir(exist_ok=True)
     total = len(rows)
     results = []
@@ -478,7 +490,7 @@ def run_accounts(rows: list, plan: str = "pro") -> list:
         print(f"\n{progress_bar(i - 1, total)}  Processing {c(email, C.BOLD)}")
         try:
             rec = ultra0.process(email, pw, sec, add=True, card=card,
-                                 plan=plan, no_switch=False)
+                                 plan=plan, no_switch=False, stack=stack)
         except Exception as e:  # noqa: BLE001
             rec = {"email": email, "status": "exception", "_hint": humanize(str(e))}
         results.append(rec)
@@ -607,7 +619,7 @@ def wizard():
     if not environment_check():
         print(c("\n  Environment check failed. Follow the instructions above and run again.", C.Y))
         return 1
-    plan = choose_plan()
+    plan, stack = choose_plan()
     if plan == "test":
         return ultra0.test_all_plans()
     rows = read_accounts()
@@ -615,7 +627,7 @@ def wizard():
         print(c("\n  No accounts entered. Exiting.", C.Y))
         return 1
     print(c(f"\n  Loaded {len(rows)} account(s). Starting activation...", C.BOLD))
-    results = run_accounts(rows, plan=plan)
+    results = run_accounts(rows, plan=plan, stack=stack)
     summary(results)
     return 0
 
