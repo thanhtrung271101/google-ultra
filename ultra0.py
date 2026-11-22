@@ -345,7 +345,9 @@ def ensure_network():
 
 # ---------- UI ----------
 def ui_xml() -> str:
-    sh("shell", "uiautomator dump /sdcard/ui.xml")
+    out = sh("shell", "uiautomator dump /sdcard/ui.xml")
+    if "dumped to" not in out.lower():
+        sh("shell", "killall -9 uiautomator 2>/dev/null; uiautomator dump /sdcard/ui.xml")
     return sh("shell", "cat /sdcard/ui.xml")
 
 
@@ -745,6 +747,11 @@ def confirm_zero(wait=40, password="", allow_paid=False) -> dict:
         xml = ui_xml()
         all_nodes = list(nodes(xml))
         text = " ".join(n["text"] for n in all_nodes if n["text"])
+        if "google play store is updating" in text.lower():
+            warn("Play Store is updating in background; dismissing notice and waiting...")
+            tap_text("OK", "Got it")
+            time.sleep(5)
+            continue
         if "not eligible" in text.lower():
             warn("Play Store notice: Account is not eligible for free trial")
             tap_text("OK", "Got it")
@@ -866,7 +873,11 @@ def confirm_zero(wait=40, password="", allow_paid=False) -> dict:
             tap_text("No, thanks", "No thanks")
             time.sleep(1)
             tap_text("Got it", "OK", "Da hieu", "Done")
-            time.sleep(2)
+            time.sleep(3)
+            post_xml = " ".join(n["text"] for n in nodes(ui_xml()) if n["text"]).lower()
+            if "backup payment" in post_xml:
+                sh("shell", "input keyevent 4")
+                time.sleep(2)
             break
 
         # Check if billing sheet closed and returned to Google One
