@@ -176,6 +176,9 @@ def _adb(*args, timeout=60):
 
 # Windows 上 MuMu 自带的 adb 常见位置
 MUMU_ADB_WIN = [
+    r"D:\MuMuPlayerGlobal\nx_device\12.0\shell\adb.exe",
+    r"D:\MuMuPlayerGlobal\nx_main\adb.exe",
+    r"C:\MuMuPlayerGlobal\nx_device\12.0\shell\adb.exe",
     r"C:\Program Files\Netease\MuMu Player 12\shell\adb.exe",
     r"C:\Program Files\Netease\MuMuPlayer-12.0\shell\adb.exe",
     r"C:\Program Files\Netease\MuMu Player\shell\adb.exe",

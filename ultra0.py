@@ -18,7 +18,7 @@ accounts.txt 每行一个号：
 脚本会自动：推 frida-server、推 BillingClient 模块、查 offer、用 eft-12month 拉起收银台，
 只有在确认金额为 0 时才点「订阅」。
 """
-import argparse, base64, hashlib, hmac, json, os, re, select, struct, subprocess, sys, threading, time
+import argparse, base64, hashlib, hmac, json, lzma, os, re, select, struct, subprocess, sys, tempfile, threading, time, urllib.request
 from pathlib import Path
 
 # 人工确认闸门：网页版点「我已完成，继续」，命令行按回车
@@ -59,6 +59,11 @@ FRIDA_REMOTE = "/data/local/tmp/frida-server"
 REPORT_DIR = Path("ultra0-report")
 
 ADB_CANDIDATES = [
+    r"D:\MuMuPlayerGlobal\nx_device\12.0\shell\adb.exe",
+    r"D:\MuMuPlayerGlobal\nx_main\adb.exe",
+    r"C:\Program Files\Netease\MuMu Player 12\shell\adb.exe",
+    r"C:\Program Files\Netease\MuMuPlayer-12.0\shell\adb.exe",
+    r"C:\MuMuPlayerGlobal\nx_device\12.0\shell\adb.exe",
     os.path.expanduser("~/Library/Android/sdk/platform-tools/adb"),
     "/opt/homebrew/bin/adb", "/usr/local/bin/adb", "/usr/bin/adb", "adb",
 ]
@@ -124,6 +129,17 @@ def ensure_root():
         sys.exit("❌ 设备没有 root 权限，脚本需要 root 才能注入。")
 
 
+def _frida_arch() -> str:
+    abi = (sh("shell", "getprop", "ro.product.cpu.abi") or "").strip().lower()
+    if "x86_64" in abi:
+        return "x86_64"
+    if "x86" in abi:
+        return "x86"
+    if "arm64" in abi or "v8" in abi:
+        return "arm64"
+    return "arm"
+
+
 def ensure_frida_server():
     running = "frida-server" in sh("shell", "ps -A | grep frida-server || true")
     if running:
@@ -136,12 +152,19 @@ def ensure_frida_server():
             ver = frida.__version__
         except Exception:
             sys.exit("❌ 电脑没装 frida。请先执行：pip3 install frida")
+        arch = _frida_arch()
         url = (f"https://github.com/frida/frida/releases/download/{ver}/"
-               f"frida-server-{ver}-android-arm64.xz")
-        tmp = Path("/tmp/frida-server.xz")
-        subprocess.run(["curl", "-L", "-o", str(tmp), url], check=True)
-        subprocess.run(["xz", "-d", "-f", str(tmp)], check=True)
-        raw = Path("/tmp/frida-server")
+               f"frida-server-{ver}-android-{arch}.xz")
+        tmp_dir = Path(tempfile.gettempdir())
+        xz_path = tmp_dir / "frida-server.xz"
+        raw = tmp_dir / "frida-server"
+        note(f"正在下载 frida-server ({arch}, v{ver})…")
+        try:
+            urllib.request.urlretrieve(url, xz_path)
+            with lzma.open(xz_path) as f:
+                raw.write_bytes(f.read())
+        except Exception as e:
+            sys.exit(f"❌ frida-server 下载或解压失败：{e}")
         sh("push", str(raw), FRIDA_REMOTE, timeout=120)
         sh("shell", f"chmod 755 {FRIDA_REMOTE}")
     sh("shell", f"su -c 'nohup {FRIDA_REMOTE} -D >/dev/null 2>&1 &'", timeout=15)
@@ -158,7 +181,7 @@ def ensure_module_apk():
         ok("计费模块已就位")
         return
     note("正在推送计费模块（一次性）…")
-    tmp = Path("/tmp/module_521.apk")
+    tmp = Path(tempfile.gettempdir()) / "module_521.apk"
     tmp.write_bytes(base64.b64decode(MODULE_B64))
     sh("push", str(tmp), MODULE_REMOTE, timeout=120)
     ok("计费模块已推送")
@@ -209,7 +232,7 @@ def tap_text(*needles, exact=False) -> bool:
         label = n["text"] or n["desc"]
         if not label:
             continue
-        hit = (label == needles[0]) if exact and needles else any(k in label for k in needles)
+        hit = (label.lower() == needles[0].lower()) if exact and needles else any(k.lower() in label.lower() for k in needles)
         if hit and (n["x"] or n["y"]):
             tap(n["x"], n["y"])
             return True
@@ -217,7 +240,15 @@ def tap_text(*needles, exact=False) -> bool:
 
 
 def type_text(s: str):
-    sh("shell", f"input text '{s.replace(' ', '%s')}'")
+    escaped = ""
+    for ch in s:
+        if ch == " ":
+            escaped += "%s"
+        elif ch in ("'", '"', "\\", "`", "$", "&", "|", ";", "<", ">", "(", ")", "!", "*", "~"):
+            escaped += f"\\{ch}"
+        else:
+            escaped += ch
+    sh("shell", f"input text {escaped}")
 
 
 def find_edit():
@@ -414,10 +445,13 @@ def launch_app() -> int:
 
 
 def build_js(plan: str = "auto") -> str:
+def build_js(plan: str = "auto", prefer: str = "") -> str:
     """按 plan 选择要查询的商品：
     5x / 20x = Ultra（20TB / 30TB），pro = AI Pro 5TB。
     """
     js = FRIDA_JS
+    if prefer:
+        js = js.replace('var PREFER="";', f'var PREFER="{prefer}";')
     if plan == "20x":
         js = js.replace('var PRODUCTS=["g1.2tb.ai.subs_variant","g1.play.2tb.ai","g1.2tb.ai"];',
                         'var PRODUCTS=["g1.play.ai.pro","g1.ai.pro","g1.30tb"];')
@@ -428,6 +462,7 @@ def build_js(plan: str = "auto") -> str:
 
 
 def run_trial(pid: int, wait=90, plan="auto") -> dict:
+def run_trial(pid: int, wait=90, plan="auto", prefer: str = "") -> dict:
     import frida
     step("注入计费模块，查询免费试用")
     dev = frida.get_usb_device(timeout=10)
@@ -449,69 +484,153 @@ def run_trial(pid: int, wait=90, plan="auto") -> dict:
             res["errors"].append(p)
 
     sc = sess.create_script(build_js(plan))
+    sc = sess.create_script(build_js(plan, prefer=prefer))
     sc.on("message", on_msg)
     sc.load()
-    time.sleep(wait)
+    for _ in range(wait * 2):
+        if res["launched"] or res["errors"]:
+            time.sleep(2)
+            break
+        time.sleep(0.5)
     return res
 
 
 def handle_verify(password="") -> bool:
     """买完可能要求重新输密码；顺手关掉 Play 积分提示。"""
     changed = False
-    for _ in range(12):
+    for _ in range(8):
         blob = " ".join(n["text"] for n in nodes(ui_xml()) if n["text"])
-        if "以后再说" in blob or "Play 积分" in blob:
-            tap_text("以后再说", "Not now"); time.sleep(2); changed = True; continue
-        if ("验证" in blob or "Verify" in blob) and password:
+        if any(k in blob.lower() for k in ("no thanks", "not now", "以后再说", "play 积分")):
+            tap_text("No thanks", "Not now", "以后再说"); time.sleep(2); changed = True; continue
+        if any(k in blob.lower() for k in ("password", "密码", "verify", "验证")) and password:
             es = [n for n in nodes(ui_xml()) if "EditText" in n["cls"]]
             if es:
                 tap(es[0]["x"], es[0]["y"]); time.sleep(0.8)
-                slow_type(password, 0.1); time.sleep(0.8)
-                tap_text("验证", "Verify"); time.sleep(6); changed = True; continue
+                type_text(password); time.sleep(0.8)
+                tap_text("Verify", "验证", "Next", "下一步"); time.sleep(6); changed = True; continue
         break
     return changed
 
 
 def confirm_zero(wait=40, password="") -> dict:
-    step("检查收银台金额（只在 0 元时确认）")
-    out = {"price": None, "confirmed": False, "ineligible": False, "text": ""}
+    step("检查收银台金额（只在 0 元或免费试用时确认）")
+    out = {"price": None, "confirmed": False, "subscribed": False, "ineligible": False, "text": ""}
+    checkout_seen = False
+    sub_x, sub_y = None, None
     for _ in range(wait // 2):
         xml = ui_xml()
-        text = " ".join(n["text"] for n in nodes(xml) if n["text"])
+        all_nodes = list(nodes(xml))
+        text = " ".join(n["text"] for n in all_nodes if n["text"])
         if "不符合免费试用条件" in text or "not eligible" in text.lower():
             warn("Play 提示：该账号不符合免费试用条件")
-            if tap_text("知道了", "OK", "Got it"):
-                time.sleep(2)
+            tap_text("知道了", "OK", "Got it")
             out["ineligible"] = True
             return out
-        if ("订阅" in text or "Subscribe" in text) and ("Ultra" in text or "AI" in text):
+        is_checkout = any(k in text.lower() for k in ("subscribe", "订阅")) and any(k in text.lower() for k in ("ultra", "ai", "google one", "5 tb", "2 tb"))
+        if is_checkout:
+            checkout_seen = True
             out["text"] = text[:300]
-            m = re.search(r"(US\$|HK\$|NT\$|\$|€|£)\s?([\d.,]+)", text)
-            if m:
-                out["price"] = m.group(0)
-                try:
-                    if float(m.group(2).replace(",", "")) == 0:
-                        tap_text("订阅", "Subscribe")
-                        out["confirmed"] = True
-                        ok("已确认 0 元订阅")
-                        return out
-                except Exception:
-                    pass
-                warn(f"当前金额 {m.group(0)}，不是 0 元，不点确认")
-                return out
-            if ("不符合免费试用条件" in text) or ("not eligible" in text.lower()):
-                out["ineligible"] = True
-                warn("Play：该账号不符合免费试用条件，不点确认")
-                tap_text("关闭", "取消", "Close"); return out
-            if (re.search(r"(US\$|HK\$|NT\$|\$)\s?0(\.00)?\b", text)
-                    or "US$0/月" in text or "US$0.00" in text
-                    or re.search(r"免费试用\s*\d+\s*(个月|年|mo|month)", text)):
-                tap_text("订阅", "Subscribe")
+            is_free = (
+                "free trial" in text.lower()
+                or "免费试用" in text
+                or re.search(r"(US\$|HK\$|NT\$|\$)\s?0(\.00)?\b", text)
+                or "0 元" in text
+                or "US$0" in text
+            )
+            if is_free:
+                ok("检测到 12 个月免费试用 / 0 元优惠，自动点击 Subscribe (第 1 次)")
+                for n in all_nodes:
+                    label = (n["text"] or n["desc"]).lower()
+                    if any(k in label for k in ("subscribe", "订阅")):
+                        sub_x, sub_y = n["x"], n["y"]
+                        break
+                if sub_x and sub_y:
+                    tap(sub_x, sub_y)
+                else:
+                    tap_text("Subscribe", "订阅")
+
+                time.sleep(2)
+                note("点击 Subscribe (第 2 次)…")
+                if not tap_text("Subscribe", "订阅"):
+                    if sub_x and sub_y:
+                        tap(sub_x, sub_y)
+
                 out["confirmed"] = True
-                ok("已确认免费试用")
+                note("等待 5 秒加载密码验证框…")
+                time.sleep(5)
+                break
+            else:
+                m = re.search(r"(US\$|HK\$|NT\$|\$|€|£)\s?([\d.,]+)", text)
+                warn(f"当前金额 {m.group(0) if m else '未知'}，非免费试用，不点确认")
                 return out
         time.sleep(2)
-    warn("没有检测到收银台（可能这个号已经订阅过）")
+
+    if not checkout_seen:
+        warn("没有检测到收银台")
+        return out
+
+    # 等待并自动处理密码验证和后续弹窗
+    step("等待支付处理 / 自动输入密码")
+    password_entered = False
+    for _ in range(45):
+        time.sleep(2)
+        xml = ui_xml()
+        nodes_list = list(nodes(xml))
+        text = " ".join(n["text"] for n in nodes_list if n["text"])
+        desc_text = " ".join(n["desc"] for n in nodes_list if n["desc"])
+        combined = (text + " " + desc_text).lower()
+
+        if not password_entered and password:
+            es = [n for n in nodes_list if "EditText" in n["cls"]]
+            has_pw_label = any(k in combined for k in ("password", "密码", "mật khẩu", "enter your password", "verify it's you", "xác minh"))
+            if es and (has_pw_label or not any(k in combined for k in ("subscribe", "订阅"))):
+                note("检测到密码验证界面，自动输入密码…")
+                tap(es[0]["x"], es[0]["y"])
+                time.sleep(0.8)
+                type_text(password)
+                time.sleep(1.0)
+                if not tap_text("Verify", "验证", "Next", "下一步", "Confirm", "确认", "Xác minh", "Tiếp tục"):
+                    sh("shell", "input keyevent 66")  # KEYCODE_ENTER
+                password_entered = True
+                note("密码已提交，等待验证结果…")
+                time.sleep(5)
+                continue
+
+        if any(k in combined for k in ("require authentication", "purchase authentication", "bảo vệ bằng mật khẩu", "xác thực khi mua")):
+            if tap_text("No thanks", "以后再说", "Không, cảm ơn", "Never"):
+                time.sleep(2)
+            elif tap_text("OK", "Next", "Tiếp tục", "Xác nhận"):
+                time.sleep(2)
+            continue
+
+        if any(k in combined for k in ("no thanks", "not now", "以后再说", "không, cảm ơn", "để sau", "bỏ qua")):
+            tap_text("No thanks", "Not now", "以后再说", "Không, cảm ơn", "Để sau", "Bỏ qua")
+            time.sleep(2)
+            continue
+
+        # 4. Google Play 报错弹窗（The item you requested is not available for purchase 等）
+        if any(k in combined for k in ("not available for purchase", "error", "không khả dụng", "không thể mua")):
+            warn("Google Play 报错：The item you requested is not available for purchase")
+            out["error"] = "item_not_available"
+            tap_text("Got it", "OK", "知道了", "Đã hiểu")
+            time.sleep(2)
+            break
+
+        if any(k in combined for k in ("payment successful", "subscribed", "success", "成功", "thành công", "đã đăng ký")):
+            ok("支付成功！")
+            out["subscribed"] = True
+            tap_text("Got it", "OK", "知道了", "Đã hiểu", "Done")
+            time.sleep(2)
+            break
+
+        # 如果收银台已关闭且回到 Google One
+        top = sh("shell", "dumpsys activity top | grep ACTIVITY").strip()
+        if "com.google.android.apps.subscriptions.red" in top and "LockToPortraitUiBuilderHostActivity" not in top and "com.android.vending" not in top:
+            ok("收银台已关闭，成功返回 Google One")
+            out["subscribed"] = True
+            time.sleep(3)
+            break
+
     return out
 
 
@@ -519,15 +638,18 @@ def verify() -> str:
     step("核对订阅状态")
     sh("shell", f"am start -a android.intent.action.VIEW "
                 f"-d 'https://play.google.com/store/account/subscriptions'")
-    time.sleep(9)
+    time.sleep(6)
+    tap_text("Got it", "OK", "知道了")
+    time.sleep(2)
     text = " | ".join(n["text"] for n in nodes(ui_xml()) if n["text"])
-    if "Ultra" in text:
-        ok("订阅页已显示 Ultra")
+    if any(k in text for k in ("Ultra", "AI", "Google One", "5 TB", "2 TB", "12-month")):
+        ok("订阅页已显示 Google One / AI Pro")
     return text[:500]
 
 
 # ---------- 单号流程 ----------
 def process(email, password="", totp_secret="", add=True, card=None, plan="auto", no_switch=False) -> dict:
+def process(email, password="", totp_secret="", add=True, card=None, plan="auto", no_switch=False, offer="") -> dict:
     print("\n" + "=" * 56)
     print(f"  处理账号：{email}")
     print("=" * 56)
@@ -561,11 +683,12 @@ def process(email, password="", totp_secret="", add=True, card=None, plan="auto"
         rec["status"] = "app_not_started"
         return rec
     fr = run_trial(pid, plan=plan)
+    fr = run_trial(pid, plan=plan, prefer=offer)
     rec.update(fr)
     if fr["launched"] and fr["launched"].get("code") == 0:
         rec["sheet"] = confirm_zero(password=password)
         rec["subscription_page"] = verify()
-        rec["status"] = "subscribed" if "Ultra" in rec["subscription_page"] else "launched"
+        rec["status"] = "subscribed" if (rec.get("sheet", {}).get("subscribed") or any(k in rec["subscription_page"] for k in ("Ultra", "AI", "Google One", "5 TB", "2 TB"))) else "launched"
     else:
         rec["status"] = "launch_failed"
     return rec
@@ -629,6 +752,7 @@ def main():
                     help="不自动切号，只校验当前 Play 账号是否为目标号")
     ap.add_argument("--plan", default="auto", choices=["auto", "pro", "5x", "20x"],
                     help="pro/auto=AI Pro 5TB（默认）；5x=Ultra 20TB；20x=Ultra 30TB")
+    ap.add_argument("--offer", default="", help="指定 offer ID（如 6months-eft, eft-3mo 等）")
     a = ap.parse_args()
 
     ADB = find_adb()
@@ -663,6 +787,7 @@ def main():
         try:
             rec = process(email, pw, sec, add=not a.no_add, card=card, plan=a.plan,
                           no_switch=a.no_switch)
+                          no_switch=a.no_switch, offer=a.offer)
         except Exception as e:
             rec = {"email": email, "status": "exception", "error": str(e)[:200]}
         results.append(rec)
