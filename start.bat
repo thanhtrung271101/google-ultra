@@ -1,6 +1,6 @@
 @echo off
-rem Google AI Pro 5TB 一键开通 —— Windows 双击这个文件就能用
-rem 做两件事：进到脚本所在目录，运行向导 wizard.py。
+rem Google AI Pro 5TB & AI Ultra One-Click Wizard — Double-click to run on Windows
+rem Changes to the script directory and launches wizard.py.
 
 chcp 65001 >nul
 cd /d "%~dp0"
@@ -13,11 +13,11 @@ if %errorlevel%==0 (
   if %errorlevel%==0 (
     python wizard.py
   ) else (
-    echo [X] 没找到 Python。先装 Python 3.9 以上：https://www.python.org/downloads/
-    echo     安装时请勾选 "Add python.exe to PATH"。
+    echo [X] Python not found. Please install Python 3.9+: https://www.python.org/downloads/
+    echo     Make sure to check "Add python.exe to PATH" during installation.
   )
 )
 
 echo.
-echo （向导已结束，按任意键关闭窗口）
+echo (Wizard finished. Press any key to close this window)
 pause >nul

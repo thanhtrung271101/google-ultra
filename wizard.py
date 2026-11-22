@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Google AI Pro 5TB —— 傻瓜式开通向导
+"""Google AI Pro 5TB & AI Ultra (20TB / 30TB) — Interactive Activation Wizard
 
-不懂命令行也能用：Mac 双击 start.command、Windows 双击 start.bat，就会进到这里。
-整条流程：环境自检 → 粘账号 → 逐个开通 → 终端表格汇总 → 打印报告目录。
+No CLI knowledge required: double-click start.command on Mac or start.bat on Windows.
+Workflow: Environment Check -> Select Plan / Test Offers -> Paste Accounts -> Activate -> Summary Table.
 
-主功能只做 AI Pro 5TB，两条 offer 依次试，命中即停：
-    g1.2tb.ai.subs_variant  12months-eft   免费 12 个月
-    g1.play.2tb.ai          eft-3mo         免费 3 个月
-第一条在部分账号上被 Play 判「已订阅」，自动退到第二条；两条都不成就是号不符合资格。
+Supported plans:
+    1) AI Pro 5TB:
+       - g1.2tb.ai.subs_variant (12months-eft / 6months-eft)
+       - g1.play.2tb.ai (eft-3mo)
+    2) AI Ultra 20TB (5x):
+       - g1.play.20tb / g1.20tb.ai.pro / g1.20tb
+    3) AI Ultra 30TB (20x):
+       - g1.play.ai.pro / g1.ai.pro / g1.30tb
+    4) All Ultra + AI Pro tiers (try longest free trial across all tiers with automatic fallback)
+    5) Test / Scan all Ultra & AI Pro offers on current account (query-only)
 
-没有安卓手机也行：用 MuMu 模拟器（Windows 装 MuMu Player 12，Mac 装 MuMu Pro），
-在设置里打开 ROOT，本向导会用 adb 连上它，后面的流程和真机完全一样。
-frida-server 架构按设备自动选（MuMu-Windows 是 x86_64，MuMu-Mac 和真机是 arm64）。
-
-高级模式：菜单最后一项，或 `python3 wizard.py --advanced`，退回原始命令行用法。
-
-注入、查 offer、确认 0 元等全部逻辑都在 ultra0.py 里，本文件只做外壳调用，不改核心。
-账号、密码、2FA、卡号只在内存里传给 ultra0，不写任何文件、不打印、不落盘。
+Works with both rooted physical Android devices and emulators (MuMu Player 12 on Windows, MuMu Pro on Mac).
+Automatically detects device architecture (x86_64 on MuMu-Windows, arm64 on MuMu-Mac and physical phones).
 """
 import lzma
 import os
@@ -38,10 +38,10 @@ IS_WIN = os.name == "nt"
 
 
 def _setup_console() -> bool:
-    """Windows/Mac 通用：把输出转 UTF-8，并在 Windows 上打开 ANSI 颜色。"""
+    """Configure UTF-8 console output and enable ANSI colors on Windows/Mac."""
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(encoding="utf-8")  # py3.7+
+            stream.reconfigure(encoding="utf-8")
         except Exception:
             pass
     if IS_WIN:
@@ -60,7 +60,7 @@ def _setup_console() -> bool:
 _COLOR = _setup_console()
 
 
-# ---------- 终端着色 / 排版 ----------
+# ---------- Terminal Colors / Formatting ----------
 class C:
     G = "\033[32m" if _COLOR else ""
     R = "\033[31m" if _COLOR else ""
@@ -76,14 +76,14 @@ def c(txt, color):
 
 
 def banner(title):
-    line = "═" * 54
+    line = "═" * 58
     print(f"\n{c(line, C.B)}")
     print(f"{c('  ' + title, C.B + C.BOLD)}")
     print(f"{c(line, C.B)}")
 
 
 def dwidth(s: str) -> int:
-    """按终端显示宽度算字符数：中日韩全角算 2。"""
+    """Calculate display width in terminal (wide characters count as 2)."""
     return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in s)
 
 
@@ -99,37 +99,38 @@ def ask_yes(prompt: str, default=True) -> bool:
         return default
     if not ans:
         return default
-    return ans in ("y", "yes", "是", "好", "行")
+    return ans in ("y", "yes")
 
 
-# ---------- 报错翻成人话 ----------
+# ---------- Friendly Error Messages ----------
 def humanize(msg: str) -> str:
-    """把 adb / frida / Play 的原始报错翻成一句人话。"""
+    """Translate raw ADB / Frida / Play Store errors into plain English."""
     m = msg or ""
     low = m.lower()
     if "processnotfound" in low or "process not found" in low or "unable to find process" in low:
-        return "Google One 没启动起来，重试一次。"
-    if "no devices" in low or "没有检测到设备" in m or "device not found" in low:
-        return "没检测到设备。真机检查数据线和 USB 调试；模拟器检查是否已启动并开了 ROOT。"
-    if "frida-server" in low and ("启动失败" in m or "fail" in low):
-        return "设备上的 frida-server 没开起来。"
-    if "没装 frida" in m or ("frida" in low and "no module" in low):
-        return "电脑没装 frida，运行：pip3 install frida"
-    if "找不到 adb" in m:
-        return "找不到 adb，请安装 Android platform-tools。"
-    if "root" in low or "注入" in m:
-        return "设备没 root。模拟器在设置里打开 ROOT 权限并重启；真机需要 Magisk 一类。"
-    if "已订阅" in m or "already subscribed" in low:
-        return "这个号用过了，换一个。"
-    if "不符合" in m or "not eligible" in low:
-        return "这个号没有试用资格。"
-    # 兜底：不把原始 traceback 丢给用户
-    return "出了点问题，重试一次；一直不行就切高级模式看详细日志。"
+        return "Google One failed to start. Please try again."
+    if "no devices" in low or "no android device" in low or "device not found" in low:
+        return "No device detected. Check USB cable & USB debugging, or start emulator with ROOT enabled."
+    if "frida-server" in low and "fail" in low:
+        return "Failed to start frida-server on the device."
+    if "frida" in low and ("not installed" in low or "no module" in low):
+        return "frida is not installed on PC. Run: pip3 install frida==16.5.9"
+    if "adb not found" in low:
+        return "ADB not found. Please install Android platform-tools."
+    if "root" in low:
+        return "Root access unavailable. Enable ROOT in emulator settings and restart, or use Magisk on a physical device."
+    if "already subscribed" in low:
+        return "This account has already used the trial. Try another account."
+    if "not eligible" in low:
+        return "This account is not eligible for the free trial."
+    if "item_not_available" in low or "not available for purchase" in low:
+        return "Requested offer is not available for purchase on this account."
+    return "An unexpected error occurred. Retry or use --advanced mode to inspect full logs."
 
 
-# ---------- 1. 环境自检 ----------
+# ---------- 1. Environment Check ----------
 def _run(fn, *a, **k):
-    """调用 ultra0 的某个会 sys.exit 的函数，吞掉退出，返回 (ok, 原始信息)。"""
+    """Run an ultra0 function that might call sys.exit and return (ok, message)."""
     try:
         fn(*a, **k)
         return True, ""
@@ -142,7 +143,7 @@ def _run(fn, *a, **k):
 def check_python() -> bool:
     v = sys.version_info
     if v < (3, 9):
-        print(c(f"  ❌ Python {v.major}.{v.minor}，需要 3.9 以上", C.R))
+        print(c(f"  ❌ Python {v.major}.{v.minor} detected; Python 3.9+ is required", C.R))
         return False
     print(c(f"  ✅ Python {v.major}.{v.minor}.{v.micro}", C.G))
     return True
@@ -154,27 +155,26 @@ def check_frida() -> bool:
         print(c(f"  ✅ frida {frida.__version__}", C.G))
         return True
     except Exception:
-        print(c("  ⚠️  电脑没装 frida", C.Y))
-        if ask_yes("     现在用 pip3 装一下吗？"):
-            r = subprocess.run([sys.executable, "-m", "pip", "install", "frida"])
+        print(c("  ⚠️  frida is not installed on this computer", C.Y))
+        if ask_yes("     Install frida now via pip?"):
+            r = subprocess.run([sys.executable, "-m", "pip", "install", "frida==16.5.9"])
             if r.returncode == 0:
                 try:
                     import frida  # noqa: F401
-                    print(c("  ✅ frida 安装完成", C.G))
+                    print(c("  ✅ frida installed successfully", C.G))
                     return True
                 except Exception:
                     pass
-        print(c("     装好后重跑。命令：pip3 install frida", C.DIM))
+        print(c("     Please install it and re-run: pip3 install frida==16.5.9", C.DIM))
         return False
 
 
 def _adb(*args, timeout=60):
-    """带 -s SERIAL 的 adb 调用（SERIAL 没设就不带）。"""
+    """Run ADB with -s SERIAL if set."""
     cmd = [ultra0.ADB] + (["-s", ultra0.SERIAL] if ultra0.SERIAL else []) + list(args)
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
-# Windows 上 MuMu 自带的 adb 常见位置
 MUMU_ADB_WIN = [
     r"D:\MuMuPlayerGlobal\nx_device\12.0\shell\adb.exe",
     r"D:\MuMuPlayerGlobal\nx_main\adb.exe",
@@ -186,7 +186,7 @@ MUMU_ADB_WIN = [
 
 
 def discover_adb():
-    """跨平台找 adb：Windows 优先 MuMu 自带的，再找 PATH / SDK；Mac 用 ultra0 的候选。"""
+    """Find ADB across platforms: prefer MuMu bundled ADB on Windows, then PATH / SDK."""
     cands = []
     if IS_WIN:
         cands += MUMU_ADB_WIN
@@ -211,16 +211,16 @@ def check_adb() -> bool:
     adb = discover_adb()
     if adb:
         ultra0.ADB = adb
-        print(c(f"  ✅ adb：{adb}", C.G))
+        print(c(f"  ✅ adb: {adb}", C.G))
         subprocess.run([adb, "start-server"], capture_output=True)
         return True
-    print(c("  ❌ 找不到 adb", C.R))
+    print(c("  ❌ ADB not found", C.R))
     if IS_WIN:
-        print(c("     用 MuMu 的话它自带 adb（MuMu 安装目录里的 shell\\adb.exe）。", C.DIM))
-        print(c("     或下载 platform-tools，解压后把目录加进系统 PATH。", C.DIM))
+        print(c("     If using MuMu Player, ADB is bundled in its installation folder (shell\\adb.exe).", C.DIM))
+        print(c("     Or download Android platform-tools and add it to your system PATH.", C.DIM))
     else:
-        print(c("     Mac 装：brew install android-platform-tools", C.DIM))
-    print(c("     装好后 `adb devices` 能跑就行。", C.DIM))
+        print(c("     On macOS, install with: brew install android-platform-tools", C.DIM))
+    print(c("     Make sure `adb devices` works in your terminal.", C.DIM))
     return False
 
 
@@ -229,7 +229,6 @@ def _devices() -> list:
     return [l.split("\t")[0] for l in out.splitlines()[1:] if "\tdevice" in l]
 
 
-# MuMu（Mac 版）常见的 adb 端口。新版多为 16384，多开按 +32 递增；老版本可能是 5555 / 7555。
 MUMU_PORTS = [16384, 16416, 16448, 16386, 5555, 7555, 21503]
 
 
@@ -239,68 +238,66 @@ def _try_connect(hostport: str) -> bool:
 
 
 def connect_device() -> bool:
-    """确保有一台设备可用（真机或 MuMu 模拟器），把 serial 写进 ultra0.SERIAL。"""
+    """Ensure an Android device or MuMu emulator is connected and set ultra0.SERIAL."""
     devs = _devices()
     if len(devs) == 1:
         ultra0.SERIAL = devs[0]
-        print(c(f"  ✅ 设备已连接：{devs[0]}", C.G))
+        print(c(f"  ✅ Device connected: {devs[0]}", C.G))
         return True
     if len(devs) > 1:
-        print("  检测到多台设备：")
+        print("  Multiple devices detected:")
         for i, d in enumerate(devs, 1):
             print(f"    {i}) {d}")
-        sel = input("  用哪一台？输序号：").strip()
+        sel = input("  Select device number: ").strip()
         idx = int(sel) - 1 if sel.isdigit() and 0 < int(sel) <= len(devs) else 0
         ultra0.SERIAL = devs[idx]
-        print(c(f"  ✅ 使用：{ultra0.SERIAL}", C.G))
+        print(c(f"  ✅ Using device: {ultra0.SERIAL}", C.G))
         return True
 
-    # 一台都没有
-    print(c("  ⚠️  没检测到设备。", C.Y))
+    print(c("  ⚠️  No connected device detected.", C.Y))
     while True:
-        print("     你用哪种？")
-        print("       1) 有已 root 的安卓手机（插 USB，开 USB 调试，手机上点允许）")
-        print("       2) 没有手机，用 MuMu 模拟器（Mac 版）")
-        print("       3) 我知道 ADB 地址，手动输入（形如 127.0.0.1:16384）")
-        print("       0) 放弃")
-        choice = input("     选：").strip()
+        print("     Which setup are you using?")
+        print("       1) Rooted Android phone (plug in USB, enable USB debugging, tap Allow)")
+        print("       2) MuMu Emulator (MuMu Player 12 / MuMu Pro)")
+        print("       3) Enter ADB address manually (e.g. 127.0.0.1:16384)")
+        print("       0) Quit")
+        choice = input("     Select: ").strip()
         if choice == "0":
             return False
         if choice == "1":
-            input("     插好手机、点过允许后，按回车继续…")
+            input("     Plug in your phone and authorize USB debugging, then press Enter...")
         elif choice == "2":
-            mumu = "MuMu Player 12（Windows 版）" if IS_WIN else "MuMu Pro（Mac 版，需 Apple Silicon）"
-            print(c("     MuMu 模拟器准备步骤：", C.B))
-            print(f"       1. 装 {mumu} 并启动一个安卓实例")
-            print("       2. 设置中心 → 打开「ROOT 权限」，然后重启模拟器")
-            print("       3. 回到这里继续，我来自动连")
-            input("     弄好后按回车，开始自动连接…")
+            mumu = "MuMu Player 12 (Windows)" if IS_WIN else "MuMu Pro (macOS)"
+            print(c("     MuMu Emulator Setup Steps:", C.B))
+            print(f"       1. Install {mumu} and start an Android instance")
+            print("       2. Open Settings -> Enable ROOT access, then restart the emulator")
+            print("       3. Return here to auto-connect")
+            input("     Press Enter when ready to auto-connect...")
             hit = None
             for p in MUMU_PORTS:
                 hp = f"127.0.0.1:{p}"
-                print(c(f"       尝试 {hp} …", C.DIM))
+                print(c(f"       Trying {hp} ...", C.DIM))
                 if _try_connect(hp):
                     hit = hp
                     break
             if not hit:
-                print(c("     自动连接没成功。到 MuMu 顶部菜单 →「工具 / Tools」→「打开 ADB」"
-                        "看一眼实际端口，", C.Y))
-                print(c("     然后回选项 3 手动输入那个 host:port。", C.Y))
+                print(c("     Auto-connect failed. Check the ADB port in MuMu settings,", C.Y))
+                print(c("     then choose option 3 to enter host:port manually.", C.Y))
         elif choice == "3":
-            hp = input("     输入 host:port：").strip()
+            hp = input("     Enter host:port: ").strip()
             if hp and _try_connect(hp):
                 ultra0.SERIAL = hp
-                print(c(f"  ✅ 已连接：{hp}", C.G))
+                print(c(f"  ✅ Connected: {hp}", C.G))
                 return True
-            print(c("     没连上，确认模拟器开着、ROOT 开了、端口对。", C.R))
+            print(c("     Connection failed. Verify the emulator is running, ROOT is on, and the port is correct.", C.R))
             continue
 
         devs = _devices()
         if devs:
             ultra0.SERIAL = devs[0]
-            print(c(f"  ✅ 设备已连接：{devs[0]}", C.G))
+            print(c(f"  ✅ Device connected: {devs[0]}", C.G))
             return True
-        print(c("     还是没有。再试一次，或选 0 放弃。", C.Y))
+        print(c("     Still no device found. Try again or enter 0 to quit.", C.Y))
 
 
 def _abi() -> str:
@@ -312,7 +309,7 @@ def _frida_running() -> bool:
 
 
 def _frida_arch() -> str:
-    """把设备 ABI 映射到 frida-server 的架构名。MuMu-Win=x86_64，MuMu-Mac/真机=arm64。"""
+    """Map device ABI to frida-server architecture name."""
     abi = _abi().lower()
     if "x86_64" in abi:
         return "x86_64"
@@ -324,25 +321,21 @@ def _frida_arch() -> str:
 
 
 def start_frida_server() -> bool:
-    """按设备架构推送并启动 frida-server。用 stdlib 下载 + 解压，不依赖 curl/xz，Windows 也能跑。
-
-    和 ultra0 的区别只有一个：架构不写死 arm64，而是看设备。其余流程一致。
-    ultra0.run_trial 只做 frida.get_usb_device().attach()，frida-server 在这里先起好即可。
-    """
+    """Download, push, and start frida-server matching the device ABI."""
     if _frida_running():
         return True
     try:
         import frida
         ver = frida.__version__
     except Exception:
-        print(c("     电脑没装 frida，运行：pip3 install frida", C.DIM))
+        print(c("     frida is not installed on PC. Run: pip3 install frida==16.5.9", C.DIM))
         return False
     on_dev = _adb("shell", f"ls {ultra0.FRIDA_REMOTE} 2>/dev/null").stdout.strip()
     if not on_dev:
         arch = _frida_arch()
         url = (f"https://github.com/frida/frida/releases/download/{ver}/"
                f"frida-server-{ver}-android-{arch}.xz")
-        print(c(f"     下载 frida-server（{arch}, v{ver}）…", C.DIM))
+        print(c(f"     Downloading frida-server ({arch}, v{ver})...", C.DIM))
         tmp = Path(tempfile.gettempdir())
         xz_path, raw_path = tmp / "frida-server.xz", tmp / "frida-server"
         try:
@@ -350,7 +343,7 @@ def start_frida_server() -> bool:
             with lzma.open(xz_path) as f:
                 raw_path.write_bytes(f.read())
         except Exception as e:  # noqa: BLE001
-            print(c(f"     下载失败：{e}", C.R))
+            print(c(f"     Download failed: {e}", C.R))
             return False
         _adb("push", str(raw_path), ultra0.FRIDA_REMOTE, timeout=120)
         _adb("shell", f"chmod 755 {ultra0.FRIDA_REMOTE}")
@@ -363,7 +356,7 @@ def start_frida_server() -> bool:
 
 
 def push_module() -> bool:
-    """推送 ultra0 内嵌的计费模块。跨平台写临时文件（不走 ultra0 里写死的 /tmp）。"""
+    """Push embedded billing module APK to device."""
     if _adb("shell", f"ls {ultra0.MODULE_REMOTE} 2>/dev/null").stdout.strip():
         return True
     tmp = Path(tempfile.gettempdir()) / "module_521.apk"
@@ -372,33 +365,33 @@ def push_module() -> bool:
 
 
 def check_device_ready() -> bool:
-    """设备连上后，确认 root / frida-server / 计费模块 / 网络。"""
-    ok, info = _run(ultra0.ensure_root)
+    """Verify root access, network, frida-server, and billing module on device."""
+    ok, _ = _run(ultra0.ensure_root)
     if not ok:
-        print(c("  ❌ 设备没 root", C.R))
-        print(c("     模拟器：设置里打开 ROOT 权限并重启。真机：需要 Magisk/KernelSU。", C.DIM))
-        _adb("root")  # 模拟器常见：adb root 能直接拿到 root adbd，顺手试一下
+        print(c("  ❌ Root access not available on device", C.R))
+        print(c("     Emulator: enable ROOT in settings and restart. Phone: enable root in Magisk/KernelSU.", C.DIM))
+        _adb("root")
         time.sleep(1)
-        ok, info = _run(ultra0.ensure_root)
+        ok, _ = _run(ultra0.ensure_root)
         if not ok:
             return False
-    print(c("  ✅ root 正常", C.G))
+    print(c("  ✅ Root access OK", C.G))
 
-    _run(ultra0.ensure_network)  # 清代理、关 Clash，失败也不拦
+    _run(ultra0.ensure_network)
     if not start_frida_server():
-        print(c("  ❌ frida-server 没起来，重试一次。", C.R))
+        print(c("  ❌ Failed to start frida-server. Please retry.", C.R))
         return False
-    print(c("  ✅ frida-server 就位", C.G))
+    print(c("  ✅ frida-server is running", C.G))
 
     if not push_module():
-        print(c("  ❌ 计费模块没推上去，重试一次。", C.R))
+        print(c("  ❌ Failed to push billing module. Please retry.", C.R))
         return False
-    print(c("  ✅ 计费模块就位", C.G))
+    print(c("  ✅ Billing module is ready", C.G))
     return True
 
 
 def environment_check() -> bool:
-    banner("第一步 · 环境自检")
+    banner("Step 1 · Environment Self-Check")
     if not check_python():
         return False
     if not check_frida():
@@ -409,27 +402,40 @@ def environment_check() -> bool:
         return False
     if not check_device_ready():
         return False
-    print(c("\n  环境全部就绪，可以开始开通了。", C.G + C.BOLD))
+    print(c("\n  Environment is ready!", C.G + C.BOLD))
     return True
 
 
-# ---------- 2. 输入账号 ----------
+# ---------- 2. Choose Plan & Input Accounts ----------
+def choose_plan() -> str:
+    banner("Step 2 · Choose Plan / Test Ultra Offers")
+    print("  Select which plan to test or activate:")
+    print("    1) Google AI Pro 5TB (Default — 12m / 6m / 3m free trial)")
+    print("    2) Google AI Ultra 20TB (5x plan)")
+    print("    3) Google AI Ultra 30TB (20x plan)")
+    print("    4) All Ultra + AI Pro tiers (Try Ultra 30TB/20TB first, fallback to AI Pro 5TB)")
+    print("    5) Scan / Test all available Ultra & AI Pro offers on current device account (No purchase)")
+    sel = input("\n  Enter choice [1-5, default=1]: ").strip()
+    mapping = {"1": "pro", "2": "5x", "3": "20x", "4": "all", "5": "test"}
+    return mapping.get(sel, "pro")
+
+
 FORMAT_HINT = """\
-  一行一个号，字段用四个短横线 ---- 隔开，顺序：
-      邮箱----密码----辅助邮箱----2FA密钥----卡号----有效期----CVC----持卡人----邮编
-  后面的项留空也行。几个例子：
+  Enter one account per line, fields separated by four dashes (----):
+      email----password----recovery_email----totp_secret----card_number----exp----cvc----holder----zip
+  Trailing fields are optional. Examples:
 
-      abc@gmail.com----密码----
-      abc@gmail.com----密码----aux@x.com----JBSWY3DPEHPK3PXP
-      abc@gmail.com----密码--------JBSWY3DPEHPK3PXP----4242424242424242----10/29----326----ZHANG SAN----97201
+      abc@gmail.com----MyPassword123!----
+      abc@gmail.com----MyPassword123!----aux@x.com----JBSWY3DPEHPK3PXP
+      abc@gmail.com----MyPassword123!--------JBSWY3DPEHPK3PXP----4242424242424242----10/29----326----JOHN DOE----97201
 
-  地址不填默认用俄勒冈（免消费税）。卡里留 1 美元就行，试用期间不扣。"""
+  Default billing zip is Oregon (97201, tax-free). $0 is charged during the free trial."""
 
 
 def read_accounts() -> list:
-    banner("第二步 · 粘贴账号")
+    banner("Step 3 · Paste Accounts")
     print(FORMAT_HINT)
-    print(c("\n  把所有账号粘进来，粘完单独一行输入 END 再回车（或按 Ctrl-D）：", C.BOLD))
+    print(c("\n  Paste your account lines below, then type END on a new line and press Enter:", C.BOLD))
     lines = []
     while True:
         try:
@@ -453,7 +459,7 @@ def read_accounts() -> list:
     return rows
 
 
-# ---------- 3. 逐号执行 ----------
+# ---------- 3. Batch Execution ----------
 def progress_bar(i: int, total: int, width: int = 24) -> str:
     done = int(width * i / total)
     bar = "█" * done + "░" * (width - done)
@@ -461,82 +467,86 @@ def progress_bar(i: int, total: int, width: int = 24) -> str:
     return f"[{i}/{total}] {c(bar, C.B)} {pct:>3}%"
 
 
-def run_accounts(rows: list) -> list:
-    banner("第三步 · 开始开通")
+def run_accounts(rows: list, plan: str = "pro") -> list:
+    banner(f"Step 4 · Activating Accounts (plan={plan})")
     ultra0.REPORT_DIR.mkdir(exist_ok=True)
     total = len(rows)
     results = []
     for i, row in enumerate(rows, 1):
         email, pw, _rec, sec = row[0], row[1], row[2], row[3]
         card = ultra0.parse_card(row)
-        print(f"\n{progress_bar(i - 1, total)}  正在处理 {c(email, C.BOLD)}")
+        print(f"\n{progress_bar(i - 1, total)}  Processing {c(email, C.BOLD)}")
         try:
             rec = ultra0.process(email, pw, sec, add=True, card=card,
-                                 plan="pro", no_switch=False)
-        except Exception as e:  # noqa: BLE001 — 单个号出错不影响其他号
+                                 plan=plan, no_switch=False)
+        except Exception as e:  # noqa: BLE001
             rec = {"email": email, "status": "exception", "_hint": humanize(str(e))}
         results.append(rec)
-        # 报告只含邮箱 + 状态 + offer 明细，不含密码/2FA/卡号
         (ultra0.REPORT_DIR / f"{email.split('@')[0]}.json").write_text(
             ultra0.json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
         label, _ = interpret(rec)
-        tone = C.G if "成功" in label else C.R
+        tone = C.G if "Success" in label else C.R
         print(f"{progress_bar(i, total)}  {c(label, tone)}")
     return results
 
 
-# ---------- 4. 结果解读 + 汇总 ----------
-PERIOD_CN = {12: "12 个月", 6: "6 个月", 3: "3 个月", 1: "1 个月"}
+# ---------- 4. Result Interpretation & Summary ----------
+PERIOD_EN = {12: "12 months", 6: "6 months", 3: "3 months", 1: "1 month"}
 PERIOD_RANK = {"P1Y": 12, "P12M": 12, "P6M": 6, "P3M": 3, "P1M": 1}
 
 
 def detect_period(rec: dict) -> str:
     text = (rec.get("sheet") or {}).get("text", "") or ""
-    m = re.search(r"(\d+)\s*个月", text) or re.search(r"(\d+)\s*months?", text, re.I)
+    m = re.search(r"(\d+)[\s-]*months?", text, re.I)
     if m:
-        return f"{m.group(1)} 个月"
-    if "1 年" in text or "P1Y" in text or "12 个月" in text:
-        return "12 个月"
+        return f"{m.group(1)} months"
+    if "1 year" in text.lower() or "P1Y" in text:
+        return "12 months"
+    chosen = rec.get("chosen") or {}
+    if chosen.get("period") in PERIOD_RANK:
+        return PERIOD_EN.get(PERIOD_RANK[chosen["period"]], chosen["period"])
     best = 0
     for o in rec.get("offers", []):
         if str(o.get("micros")) == "0":
             best = max(best, PERIOD_RANK.get(str(o.get("period")), 0))
-    return PERIOD_CN.get(best, "未知时长")
+    return PERIOD_EN.get(best, "unknown duration")
 
 
-STATUS_CN = {
-    "add_account_failed": "加号失败，在设备上手动登录这个号后重试",
-    "add_account_error": "加号出错，手动登录后重试",
-    "wrong_account": "Play 没切到这个号，手动切好后用高级模式 --no-switch 重试",
-    "play_account_switch_failed": "切 Play 账号失败，手动切好再重试",
-    "app_not_started": "Google One 没启动起来，重试一次",
-    "launch_failed": "没查到可用的免费 offer，换个号",
+STATUS_EN = {
+    "add_account_failed": "Failed to add account; log in manually on the device and retry",
+    "add_account_error": "Error while adding account; log in manually and retry",
+    "wrong_account": "Play Store account mismatch; switch manually and run with --no-switch",
+    "play_account_switch_failed": "Failed to switch Play Store account; switch manually and retry",
+    "app_not_started": "Google One app failed to start; please retry",
+    "launch_failed": "No eligible $0 free trial offer found for this account",
 }
 
 
 def interpret(rec: dict):
-    """返回 (结果, 说明)。结果：开通成功（N 个月）/ 失败。"""
+    """Return (result_label, description)."""
     status = rec.get("status")
     sheet = rec.get("sheet") or {}
-    if sheet.get("confirmed") or status == "subscribed":
-        return (f"开通成功（{detect_period(rec)}）", "免费试用已下单，记得到期前取消")
+    if sheet.get("subscribed") or status == "subscribed":
+        return (f"Success ({detect_period(rec)})", "Free trial activated; remember to cancel before renewal")
     if sheet.get("ineligible"):
-        return ("失败", "这个号没有试用资格（用过或不符合）")
+        return ("Failed", "Account is not eligible for free trial")
+    if sheet.get("error") == "item_not_available":
+        return ("Failed", "Offer not available for purchase on this account")
     if status == "launched":
-        return ("失败", "收银台金额不是 0，没有下单")
+        return ("Incomplete", "Billing sheet launched but subscription was not confirmed")
     if status == "exception":
-        return ("失败", rec.get("_hint") or humanize(rec.get("error", "")))
-    return ("失败", STATUS_CN.get(status, "未知情况，重试一次或切高级模式看日志"))
+        return ("Failed", rec.get("_hint") or humanize(rec.get("error", "")))
+    return ("Failed", STATUS_EN.get(status, "Unknown status; check logs or retry in advanced mode"))
 
 
 def summary(results: list):
-    banner("汇总")
-    headers = ("账号", "结果", "说明")
+    banner("Summary")
+    headers = ("Account", "Result", "Notes")
     rows = []
     ok_n = 0
     for rec in results:
         label, detail = interpret(rec)
-        if "成功" in label:
+        if "Success" in label:
             ok_n += 1
         rows.append((rec.get("email", "?"), label, detail))
 
@@ -545,7 +555,7 @@ def summary(results: list):
     for r in rows:
         for i in range(3):
             widths[i] = max(widths[i], dwidth(r[i]))
-    widths = [w + 2 for w in widths]  # 两边留白
+    widths = [w + 2 for w in widths]
 
     def hline(l, m, rr):
         return l + m.join("─" * w for w in widths) + rr
@@ -559,48 +569,53 @@ def summary(results: list):
     for r in rows:
         print("  " + line(r))
     print("  " + hline("└", "┴", "┘"))
-    print(f"\n  共 {len(results)} 个号，成功 {c(str(ok_n), C.G + C.BOLD)} 个，"
-          f"失败 {len(results) - ok_n} 个。")
-    print(f"  明细报告：{c(str(ultra0.REPORT_DIR.resolve()), C.B)}")
+    print(f"\n  Total: {len(results)} account(s) | Succeeded: {c(str(ok_n), C.G + C.BOLD)} | "
+          f"Failed: {len(results) - ok_n}")
+    print(f"  Detailed reports: {c(str(ultra0.REPORT_DIR.resolve()), C.B)}")
 
 
-# ---------- 高级模式 ----------
+# ---------- Advanced CLI Mode ----------
 def advanced():
-    banner("高级模式 · 原始命令行")
+    banner("Advanced Mode · CLI Usage")
     py = "python" if IS_WIN else "python3"
-    print(f"""  直接用脚本（参数和 ultra0.py 一致）：
+    print(f"""  Direct CLI commands (supports all ultra0.py options):
 
-      {py} pro.py --check                      环境自检
-      {py} pro.py accounts.txt                 批量（账号文件）
-      {py} pro.py --account "邮箱:密码:2FA密钥"   单号
-      {py} pro.py accounts.txt --no-switch     不自动切号，只校验当前号
-      {py} pro.py accounts.txt --no-add        账号已在设备上，跳过加号
+      {py} pro.py --check                                  Environment self-check
+      {py} pro.py --test-plans                             Scan all Ultra (30TB/20TB) & AI Pro (5TB) offers
+      {py} pro.py accounts.txt                             Batch run from file
+      {py} pro.py --account "email:password:totp_secret"   Single account (AI Pro 5TB)
+      {py} ultra0.py --account "email:pass:totp" --plan ultra  Test/activate Ultra 20TB/30TB
+      {py} ultra0.py --account "email:pass:totp" --plan all    Try Ultra first, fallback to AI Pro
+      {py} pro.py accounts.txt --no-switch                 Verify current Play account without switching
+      {py} pro.py accounts.txt --no-add                    Skip adding account (already on device)
 
-  账号文件格式：邮箱----密码----辅助邮箱----2FA密钥----卡号----有效期----CVC----持卡人----邮编
-  报告写在 ultra0-report/。""")
-    if ask_yes("\n  现在就把剩下的参数交给脚本跑吗？", default=False):
-        # 把 --advanced 之外的参数透传给 ultra0
+  Account line format: email----password----recovery----totp----card----exp----cvc----holder----zip
+  Reports are saved in ultra0-report/.""")
+    if ask_yes("\n  Run with remaining CLI arguments now?", default=False):
         sys.argv = [sys.argv[0]] + [a for a in sys.argv[1:] if a != "--advanced"]
-        if "--plan" not in sys.argv:
+        if "--plan" not in sys.argv and "--test-plans" not in sys.argv:
             sys.argv += ["--plan", "pro"]
         ultra0.main()
 
 
-# ---------- 入口 ----------
+# ---------- Entry Point ----------
 def wizard():
-    banner("Google AI Pro 5TB · 一键开通向导")
-    print("  只做一件事：给 Google 账号开 AI Pro 5TB 的 0 元试用。")
-    _mumu = "MuMu Player 12" if IS_WIN else "MuMu Pro（Mac）"
-    print(c(f"  没有安卓手机？用 {_mumu} 模拟器也能跑，下一步会带你连。", C.DIM))
+    banner("Google AI Pro 5TB & AI Ultra · One-Click Wizard")
+    print("  Automates $0 free trial activation for Google AI Pro (5TB) and AI Ultra (20TB / 30TB).")
+    _mumu = "MuMu Player 12" if IS_WIN else "MuMu Pro (macOS)"
+    print(c(f"  No Android phone? You can use {_mumu} with ROOT enabled.", C.DIM))
     if not environment_check():
-        print(c("\n  环境没过，按上面的提示弄好再双击一次。", C.Y))
+        print(c("\n  Environment check failed. Follow the instructions above and run again.", C.Y))
         return 1
+    plan = choose_plan()
+    if plan == "test":
+        return ultra0.test_all_plans()
     rows = read_accounts()
     if not rows:
-        print(c("\n  没读到账号，退出。", C.Y))
+        print(c("\n  No accounts entered. Exiting.", C.Y))
         return 1
-    print(c(f"\n  共 {len(rows)} 个号，开始。", C.BOLD))
-    results = run_accounts(rows)
+    print(c(f"\n  Loaded {len(rows)} account(s). Starting activation...", C.BOLD))
+    results = run_accounts(rows, plan=plan)
     summary(results)
     return 0
 
@@ -612,7 +627,7 @@ def main():
     try:
         return wizard()
     except KeyboardInterrupt:
-        print(c("\n\n  已取消。", C.Y))
+        print(c("\n\n  Cancelled by user.", C.Y))
         return 130
 
 

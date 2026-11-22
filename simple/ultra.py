@@ -1,40 +1,55 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AI Pro 一年免费 —— 极简版
+"""Google AI Pro & Ultra Free Trial — Minimal Edition
 
-只做一件事：让 Google One 把 12 个月免费试用的 offer 亮出来，确认 0 元，开好。
+Exposes hidden free trial offers in Google One via BillingClient, verifies $0 price, and subscribes.
 
-用法：
-    python3 ultra.py --check        # 检查环境
-    python3 ultra.py                # 开跑（Play 里先切到目标账号）
-    python3 ultra.py --password 你的密码   # 收银台要密码复验时自动填
+Usage:
+    python3 ultra.py --check                # Check environment
+    python3 ultra.py                        # Run (switch to target account in Play Store first)
+    python3 ultra.py --password YOUR_PASS   # Auto-fill password if Play Store asks for verification
+    python3 ultra.py --plan ultra           # Test/activate Ultra (20TB / 30TB) SKUs
 
-前置：
-    - root 过的安卓机，USB 连着电脑
-    - pip3 install frida
-    - 手机上 Play 已登录要开的那个号，并且绑好了卡
+Prerequisites:
+    - Rooted Android phone or emulator connected via ADB
+    - pip3 install frida==16.5.9
+    - Target Google account logged in on Play Store with a payment method attached
 """
 import argparse
 import base64
+import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
+from pathlib import Path
 
 ADB_LIST = [
+    r"D:\MuMuPlayerGlobal\nx_device\12.0\shell\adb.exe",
+    r"D:\MuMuPlayerGlobal\nx_main\adb.exe",
+    r"C:\Program Files\Netease\MuMu Player 12\shell\adb.exe",
+    r"C:\MuMuPlayerGlobal\nx_device\12.0\shell\adb.exe",
     "/opt/homebrew/bin/adb", "/usr/local/bin/adb",
     "/usr/bin/adb", "adb",
 ]
 PKG = "com.google.android.apps.subscriptions.red"   # Google One
-PLAY = "com.android.vending"                        # Play 商店
-SKU = "g1.2tb.ai.subs_variant"                                # AI Pro 5TB，$19.99/月
-MODULE = "/data/local/tmp/module.apk"               # 计费库载体
+PLAY = "com.android.vending"                        # Google Play Store
+SKU = "g1.2tb.ai.subs_variant"                      # AI Pro 5TB, $19.99/mo
+MODULE = "/data/local/tmp/module.apk"               # BillingClient carrier
+
+PLAN_SKUS = {
+    "pro": ["g1.2tb.ai.subs_variant", "g1.play.2tb.ai", "g1.2tb.ai"],
+    "ultra": ["g1.play.ai.pro", "g1.ai.pro", "g1.30tb", "g1.play.20tb", "g1.20tb.ai.pro", "g1.20tb"],
+    "all": ["g1.play.ai.pro", "g1.ai.pro", "g1.30tb", "g1.play.20tb", "g1.20tb.ai.pro", "g1.20tb", "g1.2tb.ai.subs_variant", "g1.play.2tb.ai", "g1.2tb.ai"],
+}
 
 ADB = None
 SERIAL = None
 
 
-# ---------------- 基础 ----------------
+# ---------------- Basics ----------------
 
 def adb(*args, timeout=60):
     cmd = [ADB] + (["-s", SERIAL] if SERIAL else []) + list(args)
@@ -65,14 +80,15 @@ def warn(msg):
 def pick_adb():
     global ADB
     for c in ADB_LIST:
-        try:
-            subprocess.run([c, "version"], capture_output=True, timeout=5)
-            ADB = c
-            ok(f"adb：{c}")
-            return
-        except Exception:
-            continue
-    bad("找不到 adb，装完 platform-tools 再加进 PATH")
+        if c == "adb" or Path(c).exists():
+            try:
+                subprocess.run([c, "version"], capture_output=True, timeout=5)
+                ADB = c
+                ok(f"adb: {c}")
+                return
+            except Exception:
+                continue
+    bad("ADB not found. Install platform-tools and add it to PATH.")
     sys.exit(1)
 
 
@@ -81,49 +97,50 @@ def pick_device():
     out = adb("devices")
     lines = [l for l in out.splitlines()[1:] if "\tdevice" in l]
     if not lines:
-        bad("没检测到设备，插好 USB、打开调试、手机上点允许")
+        bad("No device detected. Connect USB / start emulator and enable USB debugging.")
         sys.exit(1)
     SERIAL = lines[0].split("\t")[0]
-    ok(f"设备：{SERIAL}")
+    ok(f"Device: {SERIAL}")
 
 
 def need_root():
     if "uid=0" not in adb("shell", "su -c id", timeout=15):
-        bad("设备没有 root，脚本要往 Google One 进程里注入")
+        bad("Root access not available on device. Root is required to inject into Google One.")
         sys.exit(1)
-    ok("root 正常")
+    ok("Root access OK")
 
 
 def start_frida():
     if "frida-server" in adb("shell", "ps -A | grep frida-server || true"):
-        ok("frida-server 在跑")
+        ok("frida-server is running")
         return
-    bad("frida-server 没在跑，先启动它：")
+    bad("frida-server is not running. Start it first:")
     say("su -c '/data/local/tmp/frida-server &'")
     sys.exit(1)
 
 
 def push_module():
     if adb("shell", f"ls {MODULE} 2>/dev/null"):
-        ok("计费模块在位")
+        ok("Billing module is ready")
         return
-    open("/tmp/module.apk", "wb").write(base64.b64decode(MODULE_B64))
-    adb("push", "/tmp/module.apk", MODULE, timeout=120)
-    ok("计费模块已推送")
+    tmp = Path(tempfile.gettempdir()) / "module.apk"
+    tmp.write_bytes(base64.b64decode(MODULE_B64))
+    adb("push", str(tmp), MODULE, timeout=120)
+    ok("Billing module pushed")
 
 
 def clean_network():
     proxy = adb("shell", "settings get global http_proxy")
     if proxy and proxy not in ("null", ":0"):
         adb("shell", "settings put global http_proxy :0")
-        warn(f"清掉了设备代理（原 {proxy}）")
+        warn(f"Cleared device HTTP proxy (was {proxy})")
     for p in ("com.github.metacubex.clash.meta",):
         if adb("shell", f"pm list packages | grep -q {p} && echo y"):
             adb("shell", f"am force-stop {p}")
-            warn("临时关掉 Clash，它会劫持 DNS 让 Play 连不上")
+            warn("Temporarily stopped Clash (prevents Play Store DNS issues)")
 
 
-# ---------------- 界面 ----------------
+# ---------------- UI ----------------
 
 def dump():
     adb("shell", "uiautomator dump /sdcard/ui.xml")
@@ -155,7 +172,7 @@ def tap_xy(x, y):
 def tap_label(*wanted):
     for n in nodes():
         label = n["text"] or n["desc"]
-        if label and any(w in label for w in wanted) and (n["x"] or n["y"]):
+        if label and any(w.lower() in label.lower() for w in wanted) and (n["x"] or n["y"]):
             tap_xy(n["x"], n["y"])
             return True
     return False
@@ -165,11 +182,11 @@ def screen_text():
     return " ".join(n["text"] for n in nodes() if n["text"])
 
 
-# ---------------- 账号 ----------------
+# ---------------- Account ----------------
 
 def confirm_account(auto=False):
-    """把设备上的 Google 账号列出来，让人确认一次。"""
-    head("确认要开的账号")
+    """List Google accounts on device and ask user to confirm."""
+    head("Confirm target account")
     raw = adb("shell", "dumpsys account | grep 'Account {' | grep com.google")
     names = []
     for line in raw.splitlines():
@@ -180,21 +197,21 @@ def confirm_account(auto=False):
         for n in names:
             say(n)
     else:
-        warn("没列出账号，自己在手机上确认一下")
+        warn("No accounts listed; please verify manually on the device.")
     say("")
-    say("上面这些是手机里所有 Google 账号。")
-    say("脚本会用 Play 当前登录的那个，不是的话先去 Play 右上角切过去。")
+    say("Above are the Google accounts logged in on this device.")
+    say("The script uses whichever account is currently active in Google Play Store.")
     if auto:
-        ok("已跳过确认（--yes）")
+        ok("Skipped confirmation (--yes)")
         return True
     try:
-        input("   确认无误按回车继续，Ctrl+C 退出：")
+        input("   Press Enter to continue, or Ctrl+C to abort: ")
     except (EOFError, KeyboardInterrupt):
         return False
     return True
 
 
-# ---------------- 注入 ----------------
+# ---------------- Injection ----------------
 
 def start_app():
     adb("shell", f"am force-stop {PKG}")
@@ -202,14 +219,14 @@ def start_app():
     time.sleep(7)
     pid = adb("shell", f"pidof {PKG}")
     if not pid.isdigit():
-        bad("Google One 没起来")
+        bad("Google One failed to start")
         sys.exit(1)
     return int(pid)
 
 
-def inject(pid):
+def inject(pid, plan="pro"):
     import frida
-    head("查询免费试用")
+    head(f"Querying free trial offers (plan={plan})")
     dev = frida.get_usb_device(timeout=10)
     sess = dev.attach(pid)
     state = {"launched": False, "trial": None}
@@ -218,19 +235,21 @@ def inject(pid):
         p = msg.get("payload") or {}
         ev = p.get("ev")
         if ev == "offer":
-            say(f"offer {p.get('id')} → {p.get('micros')} {p.get('period')}")
+            say(f"[{p.get('product', SKU)}] offer {p.get('id')} → {p.get('micros')} {p.get('period')}")
             if p.get("micros") == "0":
                 rank = {"P1Y": 12, "P6M": 6, "P3M": 3, "P1M": 1}
                 cur = rank.get(state["trial"]["period"], 0) if state["trial"] else 0
                 if rank.get(p.get("period"), 0) > cur:
                     state["trial"] = p
         elif ev == "launched":
-            ok("收银台已拉起")
+            ok("Billing sheet launched")
             state["launched"] = True
         elif ev == "no_trial":
-            bad("这个号没有试用 offer")
+            bad("No free trial offer available for this account")
 
-    script = sess.create_script(FRIDA_JS)
+    skus = PLAN_SKUS.get(plan, PLAN_SKUS["pro"])
+    js = FRIDA_JS.replace('var SKUS = ["g1.2tb.ai.subs_variant"];', f"var SKUS = {json.dumps(skus)};")
+    script = sess.create_script(js)
     script.on("message", on_message)
     script.load()
     for _ in range(40):
@@ -242,29 +261,31 @@ def inject(pid):
 
 
 def confirm(password=""):
-    """盯收银台。只有明确 0 元才点订阅。"""
-    head("核对金额")
+    """Monitor billing sheet and confirm only if $0 free trial."""
+    head("Verifying checkout amount")
     for _ in range(25):
         text = screen_text()
 
-        if "不符合免费试用条件" in text:
-            bad("Play 说这个号不符合免费试用条件，不点")
-            tap_label("关闭", "取消")
+        if "not eligible" in text.lower():
+            bad("Play Store reports this account is not eligible for a free trial")
+            tap_label("Close", "Cancel", "Got it", "OK")
             return False
 
-        free = ("免费试用" in text) or bool(re.search(r"(US\$|\$)\s?0(\.00)?\b", text))
-        if free and "订阅" in text:
-            say("确认是 0 元，点订阅")
-            tap_label("订阅", "Subscribe")
-            time.sleep(6)
-            # 可能要重新输密码
-            for _ in range(6):
+        free = ("free trial" in text.lower()) or bool(re.search(r"(US\$|\$)\s?0(\.00)?\b", text))
+        if free and "subscribe" in text.lower():
+            say("Confirmed $0 free trial, clicking Subscribe (1st tap)")
+            tap_label("Subscribe")
+            time.sleep(2)
+            say("Clicking Subscribe (2nd tap)")
+            tap_label("Subscribe")
+            time.sleep(5)
+            for _ in range(8):
                 t2 = screen_text()
-                if "以后再说" in t2:
-                    tap_label("以后再说")
+                if any(k in t2.lower() for k in ("no thanks", "not now")):
+                    tap_label("No thanks", "Not now")
                     time.sleep(2)
                     continue
-                if ("验证" in t2 or "Verify" in t2) and password:
+                if any(k in t2.lower() for k in ("verify", "password")) and password:
                     box = [n for n in nodes() if "EditText" in n["cls"]]
                     if box:
                         tap_xy(box[0]["x"], box[0]["y"])
@@ -272,35 +293,35 @@ def confirm(password=""):
                         for ch in password:
                             adb("shell", f"input text '{ch}'")
                             time.sleep(0.1)
-                        tap_label("验证", "Verify")
-                        time.sleep(8)
+                        tap_label("Verify", "Next", "Confirm")
+                        time.sleep(6)
                 else:
                     break
             return True
 
-        if "US$19.99" in text and "订阅" in text:
-            warn("收银台显示 US$19.99，不是 0 元，放弃")
+        if "US$19.99" in text and "free trial" not in text.lower() and "subscribe" in text.lower():
+            warn("Billing sheet shows full price without free trial, aborting")
             adb("shell", "input keyevent 4")
             return False
         time.sleep(2)
-    warn("没等到收银台")
+    warn("Timed out waiting for billing sheet")
     return False
 
 
 def check_result():
-    head("核对结果")
-    adb("shell", f"am start -a android.intent.action.VIEW "
-                 f"-d 'https://play.google.com/store/account/subscriptions'")
+    head("Verifying subscription result")
+    adb("shell", "am start -a android.intent.action.VIEW "
+                 "-d 'https://play.google.com/store/account/subscriptions'")
     time.sleep(9)
     text = screen_text()
-    if "Pro" in text or "Google One" in text:
-        ok("订阅页有记录，打开看看：即将扣款日期应该是明年")
+    if any(k in text for k in ("Pro", "Ultra", "Google One")):
+        ok("Subscription active on Google Play Subscriptions page!")
     else:
-        warn("订阅页没看到记录")
+        warn("No active subscription found on Subscriptions page")
     return text[:300]
 
 
-# ---------------- 入口 ----------------
+# ---------------- Entry Point ----------------
 
 def do_check():
     pick_adb()
@@ -311,14 +332,14 @@ def do_check():
     push_module()
     try:
         import frida
-        ok(f"frida：{frida.__version__}")
+        ok(f"frida: {frida.__version__}")
     except Exception:
-        bad("电脑没装 frida：pip3 install frida")
+        bad("frida is not installed on PC: pip3 install frida==16.5.9")
         return
-    ok("环境没问题，可以开跑了")
+    ok("Environment check passed! Ready to run.")
 
 
-def run(password, auto=False):
+def run(password, auto=False, plan="pro"):
     pick_adb()
     pick_device()
     need_root()
@@ -330,11 +351,11 @@ def run(password, auto=False):
         return
 
     pid = start_app()
-    state = inject(pid)
+    state = inject(pid, plan=plan)
     if not state["trial"]:
-        bad("没有免费试用，退出")
+        bad("No free trial available, exiting")
         return
-    ok(f"选中 {state['trial']['id']}（{state['trial']['period']} 免费）")
+    ok(f"Selected {state['trial']['id']} ({state['trial']['period']} free trial)")
 
     if not confirm(password):
         return
@@ -342,371 +363,23 @@ def run(password, auto=False):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="AI Pro 一年免费 · 极简版")
-    ap.add_argument("--check", action="store_true", help="只检查环境")
-    ap.add_argument("--password", default="", help="账号密码，收银台复验时自动填")
-    ap.add_argument("--yes", action="store_true", help="跳过账号确认")
+    ap = argparse.ArgumentParser(description="Google AI Pro & Ultra Free Trial · Minimal Edition")
+    ap.add_argument("--check", action="store_true", help="Check environment only")
+    ap.add_argument("--password", default="", help="Account password for checkout verification")
+    ap.add_argument("--yes", action="store_true", help="Skip account confirmation prompt")
+    ap.add_argument("--plan", default="pro", choices=["pro", "ultra", "all"], help="Plan tier to query (pro, ultra, all)")
     a = ap.parse_args()
-    print("AI Pro 一年免费 · 极简版")
+    print("Google AI Pro & Ultra Free Trial · Minimal Edition")
     if a.check:
         do_check()
     else:
-        run(a.password, a.yes)
+        run(a.password, a.yes, a.plan)
 
 
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""AI Pro 一年免费 —— 极简版
-
-只做一件事：让 Google One 把 12 个月免费试用的 offer 亮出来，确认 0 元，开好。
-
-用法：
-    python3 ultra.py --check        # 检查环境
-    python3 ultra.py                # 开跑（Play 里先切到目标账号）
-    python3 ultra.py --password 你的密码   # 收银台要密码复验时自动填
-
-前置：
-    - root 过的安卓机，USB 连着电脑
-    - pip3 install frida
-    - 手机上 Play 已登录要开的那个号，并且绑好了卡
-"""
-import argparse
-import base64
-import re
-import subprocess
-import sys
-import time
-
-ADB_LIST = [
-    "/opt/homebrew/bin/adb", "/usr/local/bin/adb",
-    "/usr/bin/adb", "adb",
-]
-PKG = "com.google.android.apps.subscriptions.red"   # Google One
-PLAY = "com.android.vending"                        # Play 商店
-SKU = "g1.2tb.ai.subs_variant"                                # AI Pro 5TB，$19.99/月
-MODULE = "/data/local/tmp/module.apk"               # 计费库载体
-
-ADB = None
-SERIAL = None
-
-
-# ---------------- 基础 ----------------
-
-def adb(*args, timeout=60):
-    cmd = [ADB] + (["-s", SERIAL] if SERIAL else []) + list(args)
-    p = subprocess.run(cmd, capture_output=True, timeout=timeout)
-    return p.stdout.decode("utf-8", "ignore").strip()
-
-
-def say(msg):
-    print(f"   {msg}", flush=True)
-
-
-def head(msg):
-    print(f"\n▶ {msg}", flush=True)
-
-
-def ok(msg):
-    print(f"   ✅ {msg}", flush=True)
-
-
-def bad(msg):
-    print(f"   ❌ {msg}", flush=True)
-
-
-def warn(msg):
-    print(f"   ⚠️  {msg}", flush=True)
-
-
-def pick_adb():
-    global ADB
-    for c in ADB_LIST:
-        try:
-            subprocess.run([c, "version"], capture_output=True, timeout=5)
-            ADB = c
-            ok(f"adb：{c}")
-            return
-        except Exception:
-            continue
-    bad("找不到 adb，装完 platform-tools 再加进 PATH")
-    sys.exit(1)
-
-
-def pick_device():
-    global SERIAL
-    out = adb("devices")
-    lines = [l for l in out.splitlines()[1:] if "\tdevice" in l]
-    if not lines:
-        bad("没检测到设备，插好 USB、打开调试、手机上点允许")
-        sys.exit(1)
-    SERIAL = lines[0].split("\t")[0]
-    ok(f"设备：{SERIAL}")
-
-
-def need_root():
-    if "uid=0" not in adb("shell", "su -c id", timeout=15):
-        bad("设备没有 root，脚本要往 Google One 进程里注入")
-        sys.exit(1)
-    ok("root 正常")
-
-
-def start_frida():
-    if "frida-server" in adb("shell", "ps -A | grep frida-server || true"):
-        ok("frida-server 在跑")
-        return
-    bad("frida-server 没在跑，先启动它：")
-    say("su -c '/data/local/tmp/frida-server &'")
-    sys.exit(1)
-
-
-def push_module():
-    if adb("shell", f"ls {MODULE} 2>/dev/null"):
-        ok("计费模块在位")
-        return
-    open("/tmp/module.apk", "wb").write(base64.b64decode(MODULE_B64))
-    adb("push", "/tmp/module.apk", MODULE, timeout=120)
-    ok("计费模块已推送")
-
-
-def clean_network():
-    proxy = adb("shell", "settings get global http_proxy")
-    if proxy and proxy not in ("null", ":0"):
-        adb("shell", "settings put global http_proxy :0")
-        warn(f"清掉了设备代理（原 {proxy}）")
-    for p in ("com.github.metacubex.clash.meta",):
-        if adb("shell", f"pm list packages | grep -q {p} && echo y"):
-            adb("shell", f"am force-stop {p}")
-            warn("临时关掉 Clash，它会劫持 DNS 让 Play 连不上")
-
-
-# ---------------- 界面 ----------------
-
-def dump():
-    adb("shell", "uiautomator dump /sdcard/ui.xml")
-    return adb("shell", "cat /sdcard/ui.xml")
-
-
-def nodes():
-    for m in re.finditer(r"<node[^>]*>", dump()):
-        s = m.group(0)
-        t = re.search(r'text="([^"]*)"', s)
-        d = re.search(r'content-desc="([^"]*)"', s)
-        c = re.search(r'class="([^"]*)"', s)
-        b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', s)
-        if not b:
-            continue
-        yield {
-            "text": (t.group(1) if t else "") or "",
-            "desc": (d.group(1) if d else "") or "",
-            "cls": (c.group(1) if c else "") or "",
-            "x": (int(b.group(1)) + int(b.group(3))) // 2,
-            "y": (int(b.group(2)) + int(b.group(4))) // 2,
-        }
-
-
-def tap_xy(x, y):
-    adb("shell", f"input tap {x} {y}")
-
-
-def tap_label(*wanted):
-    for n in nodes():
-        label = n["text"] or n["desc"]
-        if label and any(w in label for w in wanted) and (n["x"] or n["y"]):
-            tap_xy(n["x"], n["y"])
-            return True
-    return False
-
-
-def screen_text():
-    return " ".join(n["text"] for n in nodes() if n["text"])
-
-
-# ---------------- 账号 ----------------
-
-def play_account():
-    """读 Play 当前登录的邮箱。"""
-    adb("shell", f"am start -n {PLAY}/com.google.android.finsky.activities.MainActivity")
-    time.sleep(6)
-    cur = ""
-    for n in nodes():
-        if "账号和设置" in n["desc"]:
-            tap_xy(n["x"], n["y"])
-            time.sleep(3)
-            break
-    for n in nodes():
-        m = re.search(r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+)", n["desc"] + " " + n["text"])
-        if m:
-            cur = m.group(1).lower()
-            break
-    adb("shell", "input keyevent 4")
-    return cur
-
-
-# ---------------- 注入 ----------------
-
-def start_app():
-    adb("shell", f"am force-stop {PKG}")
-    adb("shell", f"am start -n {PKG}/.main.MainActivity")
-    time.sleep(7)
-    pid = adb("shell", f"pidof {PKG}")
-    if not pid.isdigit():
-        bad("Google One 没起来")
-        sys.exit(1)
-    return int(pid)
-
-
-def inject(pid):
-    import frida
-    head("查询免费试用")
-    dev = frida.get_usb_device(timeout=10)
-    sess = dev.attach(pid)
-    state = {"launched": False, "trial": None}
-
-    def on_message(msg, _):
-        p = msg.get("payload") or {}
-        ev = p.get("ev")
-        if ev == "offer":
-            say(f"offer {p.get('id')} → {p.get('micros')} {p.get('period')}")
-            if p.get("micros") == "0":
-                rank = {"P1Y": 12, "P6M": 6, "P3M": 3, "P1M": 1}
-                cur = rank.get(state["trial"]["period"], 0) if state["trial"] else 0
-                if rank.get(p.get("period"), 0) > cur:
-                    state["trial"] = p
-        elif ev == "launched":
-            ok("收银台已拉起")
-            state["launched"] = True
-        elif ev == "no_trial":
-            bad("这个号没有试用 offer")
-
-    script = sess.create_script(FRIDA_JS)
-    script.on("message", on_message)
-    script.load()
-    for _ in range(40):
-        if state["launched"]:
-            break
-        time.sleep(1)
-    time.sleep(3)
-    return state
-
-
-def confirm(password=""):
-    """盯收银台。只有明确 0 元才点订阅。"""
-    head("核对金额")
-    for _ in range(25):
-        text = screen_text()
-
-        if "不符合免费试用条件" in text:
-            bad("Play 说这个号不符合免费试用条件，不点")
-            tap_label("关闭", "取消")
-            return False
-
-        free = ("免费试用" in text) or bool(re.search(r"(US\$|\$)\s?0(\.00)?\b", text))
-        if free and "订阅" in text:
-            say("确认是 0 元，点订阅")
-            tap_label("订阅", "Subscribe")
-            time.sleep(6)
-            # 可能要重新输密码
-            for _ in range(6):
-                t2 = screen_text()
-                if "以后再说" in t2:
-                    tap_label("以后再说")
-                    time.sleep(2)
-                    continue
-                if ("验证" in t2 or "Verify" in t2) and password:
-                    box = [n for n in nodes() if "EditText" in n["cls"]]
-                    if box:
-                        tap_xy(box[0]["x"], box[0]["y"])
-                        time.sleep(0.8)
-                        for ch in password:
-                            adb("shell", f"input text '{ch}'")
-                            time.sleep(0.1)
-                        tap_label("验证", "Verify")
-                        time.sleep(8)
-                else:
-                    break
-            return True
-
-        if "US$19.99" in text and "订阅" in text:
-            warn("收银台显示 US$19.99，不是 0 元，放弃")
-            adb("shell", "input keyevent 4")
-            return False
-        time.sleep(2)
-    warn("没等到收银台")
-    return False
-
-
-def check_result():
-    head("核对结果")
-    adb("shell", f"am start -a android.intent.action.VIEW "
-                 f"-d 'https://play.google.com/store/account/subscriptions'")
-    time.sleep(9)
-    text = screen_text()
-    if "Pro" in text or "Google One" in text:
-        ok("订阅页有记录，打开看看：即将扣款日期应该是明年")
-    else:
-        warn("订阅页没看到记录")
-    return text[:300]
-
-
-# ---------------- 入口 ----------------
-
-def do_check():
-    pick_adb()
-    pick_device()
-    need_root()
-    clean_network()
-    start_frida()
-    push_module()
-    try:
-        import frida
-        ok(f"frida：{frida.__version__}")
-    except Exception:
-        bad("电脑没装 frida：pip3 install frida")
-        return
-    ok("环境没问题，可以开跑了")
-
-
-def run(password, auto=False):
-    pick_adb()
-    pick_device()
-    need_root()
-    clean_network()
-    start_frida()
-    push_module()
-
-    if not confirm_account(auto):
-        return
-
-    pid = start_app()
-    state = inject(pid)
-    if not state["trial"]:
-        bad("没有免费试用，退出")
-        return
-    ok(f"选中 {state['trial']['id']}（{state['trial']['period']} 免费）")
-
-    if not confirm(password):
-        return
-    check_result()
-
-
-def main():
-    ap = argparse.ArgumentParser(description="AI Pro 一年免费 · 极简版")
-    ap.add_argument("--check", action="store_true", help="只检查环境")
-    ap.add_argument("--password", default="", help="账号密码，收银台复验时自动填")
-    ap.add_argument("--yes", action="store_true", help="跳过账号确认")
-    a = ap.parse_args()
-    print("AI Pro 一年免费 · 极简版")
-    if a.check:
-        do_check()
-    else:
-        run(a.password, a.yes)
-
-
-
-# 内嵌：注入脚本与计费模块，别改
-FRIDA_JS = r'''// 借 Google One 进程调 BillingClient，把 AI Pro 的免费试用 offer 拿出来
+# Embedded Frida script & BillingClient module (do not modify MODULE_B64)
+FRIDA_JS = r'''// Query free trial offers via BillingClient inside Google One process
 var loader = null, ctx = null, client = null;
-var SKU = "g1.2tb.ai.subs_variant";
+var SKUS = ["g1.2tb.ai.subs_variant"];
 
 function use(v) { Java.classFactory.loader = v; }
 function send2(o) { send(o); }
@@ -777,18 +450,21 @@ function query() {
           var PD = Java.use("com.android.billingclient.api.ProductDetails");
           var SOD = Java.use("com.android.billingclient.api.ProductDetails$SubscriptionOfferDetails");
           var PP = Java.use("com.android.billingclient.api.ProductDetails$PricingPhase");
-          var pd = Java.cast(list.get(0), PD);
-          var offers = pd.getSubscriptionOfferDetails();
-          if (!offers) { send2({ ev: "no_trial" }); return; }
           var best = null;
-          for (var i = 0; i < offers.size(); i++) {
-            var o = Java.cast(offers.get(i), SOD);
-            var first = Java.cast(o.getPricingPhases().getPricingPhaseList().get(0), PP);
-            var micros = String(first.getPriceAmountMicros());
-            var period = String(first.getBillingPeriod());
-            send2({ ev: "offer", id: String(o.getOfferId()), micros: micros, period: period });
-            if (micros === "0" && (!best || rank(period) > rank(best.period))) {
-              best = { pd: pd, offer: o, period: period };
+          for (var j = 0; j < list.size(); j++) {
+            var pd = Java.cast(list.get(j), PD);
+            var pid = String(pd.getProductId());
+            var offers = pd.getSubscriptionOfferDetails();
+            if (!offers) continue;
+            for (var i = 0; i < offers.size(); i++) {
+              var o = Java.cast(offers.get(i), SOD);
+              var first = Java.cast(o.getPricingPhases().getPricingPhaseList().get(0), PP);
+              var micros = String(first.getPriceAmountMicros());
+              var period = String(first.getBillingPeriod());
+              send2({ ev: "offer", product: pid, id: String(o.getOfferId()), micros: micros, period: period });
+              if (micros === "0" && (!best || rank(period) > rank(best.period))) {
+                best = { pd: pd, offer: o, period: period };
+              }
             }
           }
           if (!best) { send2({ ev: "no_trial" }); return; }
@@ -797,7 +473,9 @@ function query() {
       }
     });
     var arr = Java.use("java.util.ArrayList").$new();
-    arr.add(P.newBuilder().setProductId(SKU).setProductType("subs").build());
+    for (var k = 0; k < SKUS.length; k++) {
+      arr.add(P.newBuilder().setProductId(SKUS[k]).setProductType("subs").build());
+    }
     use(loader);
     client.queryProductDetailsAsync(Q.newBuilder().setProductList(arr).build(), cb.$new());
   } catch (e) { send2({ ev: "query_err", m: String(e).slice(0, 160) }); }

@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Google AI Pro 5TB —— 0 元试用一键开通
+"""Google AI Pro 5TB & AI Ultra — $0 Free Trial One-Click Activation
 
-和 ultra0.py 是同一套注入流程，只换了商品 ID：
-    g1.2tb.ai.subs_variant  12months-eft   12 个月免费
-    g1.play.2tb.ai          eft-3mo         3 个月免费
+Uses the same injection pipeline as ultra0.py:
+    g1.2tb.ai.subs_variant  12months-eft / 6months-eft  (12-month / 6-month free trial)
+    g1.play.2tb.ai          eft-3mo                     (3-month free trial)
+    g1.play.20tb            Ultra 20TB (5x)
+    g1.play.ai.pro          Ultra 30TB (20x)
 
-用法:
-    python3 pro.py --check            # 环境自检
-    python3 pro.py accounts.txt       # 批量
-    python3 pro.py --account "a@b.com:密码:2FA密钥"
+Usage:
+    python3 pro.py --check                                 # Environment self-check
+    python3 pro.py --test-plans                            # Test/scan all Ultra & AI Pro offers
+    python3 pro.py accounts.txt                            # Batch mode
+    python3 pro.py --account "a@b.com:password:totp_key"   # Single account
+    python3 pro.py --account "a@b.com:pass:totp" --plan ultra  # Activate Ultra tier
 
-其余参数与 ultra0.py 完全一致（--no-add / --no-switch / --serial）。
+All other options match ultra0.py (--no-add / --no-switch / --serial / --plan / --offer).
 """
 import sys
 from pathlib import Path
@@ -21,7 +25,7 @@ import ultra0  # noqa: E402
 
 
 def main():
-    if "--plan" not in sys.argv:
+    if "--plan" not in sys.argv and "--test-plans" not in sys.argv:
         sys.argv += ["--plan", "pro"]
     ultra0.main()
     return 0
